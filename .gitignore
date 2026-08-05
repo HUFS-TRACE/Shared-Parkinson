@@ -1,0 +1,17 @@
+# 필기 원본 signal (용량 큼, git에 올리지 않음)
+전처리_handpd/HealthySignal/
+전처리_handpd/PatientSignal/
+
+# 필기 전처리 산출물 (preprocess.py로 언제든 재생성 가능)
+*.npz
+
+# 음성 .npy는 제외하지 않는다 — LFS로 관리되며 이미 커밋돼 있음
+
+# 모델 체크포인트
+*.pt
+*.pth
+
+# 파이썬
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
