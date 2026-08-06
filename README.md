@@ -1,29 +1,70 @@
-# parkinson-audio-preprocessing
-전처리_data3입니다. 그리고 전처리_pataka도 data3에서 같이 들어있던 데이터입니다. 밑에 같은 사람 구별 번호 적겠습니다. 
-HC (55명)      파일명 맨뒤 숫자가 같은번호면 같은 사람입니다. - 전처리_data3와 pataka 데이터 해당
-34, 36, 45, 48, 49, 51, 52, 53, 54, 55, 56, 60, 61, 62, 63, 64, 65, 71, 72, 73, 74, 75, 76, 80, 81, 82, 83, 85, 86, 87, 105, 112, 116, 118, 120, 121, 122, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145
-PD (53명)
-4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 58, 66, 67, 70, 77, 78, 79, 108, 109, 111, 113, 115, 117
+# Shared PatchTST 기반 경량 파킨슨병 스크리닝 모델
 
+## 📌 프로젝트 목표
 
-# 1. 음성 데이터 전처리 완료 사항 (공통)
-모든 음성 데이터(모음 연장, DDK, 읽기 과제)는 환경 변수를 통제하기 위해 다음과 같은 동일한 파이프라인으로 전처리를 완료하여 .npy 형태로 저장했습니다.
-리샘플링 및 채널 통일: 16kHz, Mono
-대역 통일 (Lowpass Filter): 기기간 녹음 환경(스마트폰, 고음질 마이크 등) 차이를 모델이 학습하는 과적합을 막기 위해 7500Hz 기준으로 컷오프 적용.
-DC Offset 제거: 파형의 영점 조절 완료.
-무음 트리밍 (주의): 오디오의 맨 앞과 맨 뒤의 무음만 제거함(librosa.effects.trim). 환자의 발화 중 멈춤(Pause)이나 머뭇거림은 질환의 핵심 특징이므로 내부 휴지는 절대 자르지 않고 그대로 보존함.
-스펙트로그램 추출: Log-Mel Spectrogram (Window: 25ms, Hop: 10ms, n_mels: 80). 데이터별 원본 길이를 유지했으므로 PyTorch DataLoader에서 Padding 처리 필수.
+본 프로젝트는 **음성(Voice)** 데이터와 **필압(HandPD)** 데이터를 하나의 **Shared PatchTST Encoder**를 통해 학습하는 경량 파킨슨병 스크리닝 모델을 개발하는 것을 목표로 한다.
 
-##2. 🚨 [중요] 발성 과제별 데이터 분리 및 입력 전략
-모음 발성('아', 'aeiou')과 교대운동능력('파타카', DDK)은 평가하는 발성 기관의 기능이 완전히 다르므로, 단일 데이터셋으로 무작정 섞어서(Shuffle) 학습시키면 안 됩니다.
-모음(aeiou) 과제: 성대의 미세한 떨림, 호흡의 안정성 관찰 (부드럽고 연속적인 패턴)
-DDK(파타카) 과제: 조음 기관(입술, 혀)의 민첩성, 운동 경직, 리듬감 붕괴 관찰 (짧고 날카롭게 끊어지는 패턴)
-[모델링 권장 방향]
-이 데이터들은 하나의 입력 채널로 섞지 말고, 아래 두 가지 방법 중 하나를 채택하여 모델을 구성해 주세요.
-Multi-input Architecture (Early/Feature Fusion): '모음 스펙트로그램'과 '파타카 스펙트로그램'을 각각의 독립된 인코더(CNN 또는 ViT)로 특징을 추출한 뒤, 최종 Fully Connected Layer에서 결합(Concatenation)하는 구조.
-Ensemble (Late Fusion): 모음 전용 모델과 파타카 전용 모델을 따로 학습시킨 후 결과(Probability)를 앙상블.
+음성과 필압에 대해 각각 별도의 모델을 학습하는 것이 아니라, **모달리티별 입력 임베딩(Embedding)은 분리**하고, **Transformer Encoder는 공유(Shared Encoder)** 하여 하나의 모델로 학습한다.
 
+또한 Layer 기반 Early Exit이 아닌, **Input-based Early Exit** 방식을 적용하여 입력 데이터를 순차적으로 처리하면서 충분한 신뢰도(Confidence)를 얻었을 경우 전체 입력을 모두 사용하지 않고 조기에 추론을 종료하는 것을 목표로 한다.
 
-##3. 🚨 [중요] 라우드니스(Loudness) 피처 추가 결합
-전처리 과정에서 파킨슨 환자의 핵심 증상 중 하나인 저음증(Hypophonia, 목소리 작아짐)을 잡아내기 위해 오디오의 라우드니스(LUFS) 값을 따로 측정하여 보관했습니다. (loudness_features.csv)
-적용 방법: 스펙트로그램(2D 이미지)이 인코더를 통과하여 나온 1D Feature Vector의 마지막 단에 이 라우드니스 스칼라값을 추가로 이어 붙여서(Concatenate) 최종 분류기(Classifier)에 통과시켜 주시기 바랍니다. 이 1개의 차원 추가가 진단 성능에 큰 영향을 미칩니다.
+### 개발 목표
+
+- Voice와 HandPD를 하나의 Shared PatchTST Encoder로 학습
+- 모달리티별 Embedding, Shared Transformer 구조 설계
+- Input-based Early Exit 적용
+- 정확도를 유지하면서 평균 추론 시간 및 연산량 감소
+
+---
+
+# 📂 프로젝트 구조
+
+```text
+Shared-Encoder/
+│
+├── README.md
+├── requirements.txt
+├── train.py
+├── test.py
+│
+├── configs/
+│   ├── config.yaml
+│   └── model.yaml
+│
+├── dataset/
+│   ├── raw/
+│   │   ├── voice/
+│   │   └── handpd/
+│   │
+│   ├── processed/
+│   │   ├── voice/
+│   │   └── handpd/
+│   │
+│   └── split/
+│       ├── holdout.csv
+│       ├── fold1.csv
+│       ├── fold2.csv
+│       ├── fold3.csv
+│       ├── fold4.csv
+│       └── fold5.csv
+│
+├── preprocessing/
+│   ├── voice/
+│   │   └── preprocess_voice.py
+│   │
+│   └── handpd/
+│       └── preprocess_hand.py
+│
+├── models/
+│   ├── embedding.py
+│   ├── patch_embedding.py
+│   ├── shared_patchtst.py
+│   └── classifier.py
+│
+├── early_exit/
+│   └── input_based_exit.py
+│
+└── utils/
+    ├── dataset.py
+    └── metrics.py
+```
