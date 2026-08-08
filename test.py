@@ -18,10 +18,15 @@
 """
 import argparse
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+
+# Windows 한국어 로캘에서 출력 리다이렉트 시 cp949가 되어 이모지에서 죽는다
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent
 METRICS = [("roc_auc", "ROC-AUC"), ("subject_acc", "피험자 정확도"),

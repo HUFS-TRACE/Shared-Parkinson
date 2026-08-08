@@ -25,12 +25,19 @@
 """
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import yaml
+
+# Windows 한국어 로캘에서 출력을 파일로 리다이렉트하면 stdout이 cp949가 되어
+# 이모지·일부 기호에서 UnicodeEncodeError로 죽는다. 결과 저장 뒤에 터지면
+# 로그만 잘려 원인을 찾기 어려우므로 처음부터 UTF-8로 고정한다.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from models.shared_patchtst import SharedPatchTST
 from utils.dataset import (PairedBatches, class_weights, load_modality,
