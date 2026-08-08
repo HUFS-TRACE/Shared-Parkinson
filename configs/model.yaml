@@ -1,0 +1,25 @@
+# 모델 구조 — 공유 인코더는 모달 공통, 패치 설정만 모달별
+#
+# ⚠️ d_model·n_layers는 모달별로 다르게 둘 수 없다. 인코더를 공유하기 때문이다.
+#    필기 최적은 d64/L6, 음성 최적은 d128/L2로 서로 다른데, 통일하면 한쪽은
+#    자기 최적을 포기한다. 대신 **비교 대상 단독 모델도 같은 설정으로** 돌려야
+#    "공유 효과"와 "설정 효과"가 섞이지 않는다.
+
+shared_encoder:
+  d_model: 64
+  n_heads: 4
+  n_layers: 6
+  d_ff: 128
+  dropout: 0.2
+  head_dropout: 0.2
+
+num_classes: 2
+
+# 모달별 패칭 — 각자의 스윕에서 나온 최적값
+modalities:
+  hw:
+    patch_len: 100     # T=2000 → 토큰 39개 (50% 겹침)
+    stride: 50
+  voice:
+    patch_len: 24      # T=200  → 토큰 15개 (50% 겹침)
+    stride: 12
