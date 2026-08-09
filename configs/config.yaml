@@ -1,0 +1,27 @@
+# 학습·평가 설정
+#
+# 단독 기준선과 공유 모델을 **같은 값으로** 돌려야 A/B 비교가 성립한다.
+# (epoch 상한이나 클래스 가중치가 다르면 그 차이가 결과에 섞인다)
+
+data:
+  # 전처리 산출물 경로. dataset/processed/ 아래에 두거나 CLI로 덮어쓴다.
+  hw_path: dataset/processed/handpd/windows_2s.npz
+  voice_path: dataset/processed/voice/voice_windows_2s.npz
+
+train:
+  epochs: 15
+  patience: 5           # val loss 개선이 없을 때 참는 epoch 수
+  batch_size: 64
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  label_smoothing: 0.0
+  pair_mode: longest    # longest | shortest — utils/dataset.PairedBatches 주석 참고
+
+split:
+  n_folds: 5
+  val_size: 0.1
+  seed: 42
+  stratified: false     # true면 StratifiedGroupKFold. 기본 GroupKFold는 층화를 안 한다
+
+output:
+  result_dir: results
