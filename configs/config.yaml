@@ -6,7 +6,7 @@
 data:
   # 전처리 산출물 경로. dataset/processed/ 아래에 두거나 CLI로 덮어쓴다.
   hw_path: dataset/processed/handpd/windows_2s.npz
-  voice_path: dataset/processed/voice/voice_windows_2s.npz
+  voice_path: dataset/processed/voice/voice_windows_1.5s.npz
 
 train:
   epochs: 15
