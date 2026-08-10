@@ -1,5 +1,7 @@
-﻿results/
+results/
 __pycache__/
 *.pyc
 _tmp_*.pt
 
+# 필기 원본 signal · 전처리 산출물 (용량 큼, preprocess.py로 재생성 가능)
+dataset/processed/handpd/
