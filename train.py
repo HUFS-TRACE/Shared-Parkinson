@@ -68,6 +68,14 @@ def parse_args():
     p.add_argument("--smoke-test", action="store_true",
                    help="합성 데이터로 파이프라인만 점검 (실제 npz 불필요)")
     p.add_argument("--out", help="결과 CSV 경로. 기본은 results/<태그>.csv")
+    p.add_argument("--hw-channels",
+                   help="필기 채널 부분집합 (0-based, 쉼표). 예: 3,2,1 "
+                        "→ TiltX·압력·그립만. 센서 축 연산량 실험용")
+    p.add_argument("--voice-channels",
+                   help="음성 멜밴드 부분집합 (0-based, 쉼표)")
+    p.add_argument("--save-probs", action="store_true",
+                   help="윈도우별 P(환자)를 저장한다. 시간 축 Early Exit(윈도우 개수)의 "
+                        "입력이며, 이후 단계는 재학습 없이 이 파일만 읽는다")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -109,6 +117,21 @@ def gather_data(args, cfg):
                     f"[{m}] {path} 가 없습니다. configs/config.yaml의 경로를 고치거나 "
                     f"--{m}-path로 지정하세요. 파이프라인만 확인하려면 --smoke-test.")
             X, y, sid = load_modality(path)
+
+        # 센서(채널) 축 실험 — 채널 부분집합만 남긴다.
+        # RevIN의 채널별 affine과 분류기의 num_channels·d_model 입력이 채널 수에
+        # 묶여 있어, 학습된 모델에서 채널을 빼는 것은 불가능하다. 그래서 부분집합을
+        # **학습 전에** 잘라 독립 학습한다. 그러면 "같은 설정에서 채널만 다르다"가
+        # 성립해 정확도 차이를 채널 탓으로 돌릴 수 있다.
+        sel = getattr(args, f"{m}_channels", None)
+        if sel:
+            idx = [int(c) for c in sel.split(",")]
+            if max(idx) >= X.shape[1] or min(idx) < 0:
+                raise SystemExit(f"[{m}] 채널 번호가 범위를 벗어남: {idx} "
+                                 f"(0~{X.shape[1] - 1})")
+            print(f"  [{m}] 채널 {len(idx)}/{X.shape[1]}개 선택: {idx}")
+            X = np.ascontiguousarray(X[:, idx, :])
+
         data[m] = dict(X=X, y=y, subject_id=sid)
     return data
 
@@ -136,6 +159,34 @@ def eval_modality(model, modality, loader, criterion, device):
             probs.append(torch.softmax(logits, dim=1)[:, 1].cpu())
     return (total / len(loader.dataset),
             torch.cat(preds).numpy(), torch.cat(labels).numpy(), torch.cat(probs).numpy())
+
+
+def save_probs(saved, data, tag, result_dir):
+    """윈도우별 P(환자)를 모달마다 npz로 저장. 시간 축 Early Exit의 입력이다.
+
+    이후 단계(사전점검 · 캘리브레이션 · 순차판정)는 이 파일만 읽고 재학습하지 않는다.
+    한 사람의 윈도우를 순서대로 넣어 판정하는 구조라, 윈도우가 어느 피험자의
+    몇 번째인지 알아야 한다. 그래서 subject_id와 원래 인덱스를 함께 남긴다.
+    """
+    for m, s in saved.items():
+        if not s["prob"]:
+            continue
+        cat = {k: np.concatenate(v) for k, v in s.items()}
+        idx = cat["idx"]
+        assert len(np.unique(idx)) == len(idx), \
+            f"{m}: test 인덱스 중복 — fold 분할이 깨졌다"
+        out = result_dir / f"probs_{m}_{tag}.npz"
+        np.savez_compressed(
+            out,
+            prob=cat["prob"], idx=idx, fold=cat["fold"],
+            y=data[m]["y"][idx], subject_id=data[m]["subject_id"][idx],
+            val_prob=cat["val_prob"], val_idx=cat["val_idx"],
+            val_fold=cat["val_fold"], val_y=data[m]["y"][cat["val_idx"]],
+            val_subject_id=data[m]["subject_id"][cat["val_idx"]],
+        )
+        n_dup = len(cat["val_idx"]) - len(np.unique(cat["val_idx"]))
+        print(f"  확률 저장: {out.name}  "
+              f"(test {len(idx)} / val {len(cat['val_idx'])}, val 중복 {n_dup})")
 
 
 def train_fold(model, train_loaders, val_loaders, criteria, cfg, device, ckpt):
@@ -231,6 +282,10 @@ def main():
     acc = {m: {k: [] for k in
                ("window_acc", "subject_acc", "subject_acc_soft", "roc_auc")} for m in data}
     epochs_used = []
+    # 시간 축 Early Exit용 윈도우 확률. test는 fold를 가로질러 전체를 정확히 한 번씩
+    # 덮지만, val은 fold마다 새로 떼므로 겹칠 수 있다. 그래서 fold 태그를 함께 남긴다.
+    saved = {m: {k: [] for k in ("prob", "idx", "fold",
+                                 "val_prob", "val_idx", "val_fold")} for m in data}
     ckpt = result_dir / f"_tmp_{os.getpid()}.pt"
 
     for fold in range(cfg["split"]["n_folds"]):
@@ -257,11 +312,25 @@ def main():
             met = evaluate_predictions(preds, probs, labels, data[m]["subject_id"][te])
             for k, v in met.items():
                 acc[m][k].append(v)
+
+            if args.save_probs:
+                # 캘리브레이션(온도·사전확률 보정)은 val에서 정해야 한다. test에서
+                # 맞추면 테스트셋 피팅이고, fold마다 모델이 다르므로 fold별로 따로 구한다.
+                _, _, _, vp = eval_modality(model, m, loaders[m][1], criteria[m], device)
+                va = folds[m][fold][1]
+                s = saved[m]
+                s["prob"].append(probs);  s["idx"].append(te)
+                s["fold"].append(np.full(len(te), fold))
+                s["val_prob"].append(vp); s["val_idx"].append(va)
+                s["val_fold"].append(np.full(len(va), fold))
             print(f"    {m:<6} 윈도우 {met['window_acc']:.3f}   "
                   f"피험자 hard {met['subject_acc']:.3f} / soft {met['subject_acc_soft']:.3f}"
                   f"   AUC {met['roc_auc']:.3f}")
 
     ckpt.unlink(missing_ok=True)
+
+    if args.save_probs:
+        save_probs(saved, data, out.stem, result_dir)
 
     print(f"\n{'모달':<8}{'윈도우acc':>16}{'피험자 hard':>18}{'피험자 soft':>18}{'AUC':>16}")
     rows = []
