@@ -57,6 +57,7 @@ class SharedPatchTST(nn.Module):
         d_ff=128,
         dropout=0.2,
         head_dropout=0.2,
+        head="linear",
     ):
         super().__init__()
         if not specs:
@@ -89,7 +90,7 @@ class SharedPatchTST(nn.Module):
         self.classifiers = nn.ModuleDict({
             name: ModalityClassifier(
                 num_channels=s["num_channels"], d_model=d_model,
-                num_classes=num_classes, dropout=head_dropout)
+                num_classes=num_classes, dropout=head_dropout, head=head)
             for name, s in specs.items()
         })
 
