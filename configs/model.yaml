@@ -21,5 +21,9 @@ modalities:
     patch_len: 100     # T=2000 → 토큰 39개 (50% 겹침)
     stride: 50
   voice:
-    patch_len: 24      # T=200  → 토큰 15개 (50% 겹침)
+    # ⚠️ 이 값은 T=200(2초)일 때 토큰 15개를 노린 것인데, 실제 데이터는
+    #    voice_windows_1.5s.npz라 T=150이다. (150-24)//12+1 = 토큰 11개이고
+    #    커버는 144프레임 — 매 윈도우의 마지막 6프레임(4%)이 버려진다.
+    #    stride를 9로 두면 토큰 15개에 손실 0이 된다. run_sweep.py voice_stride 참고.
+    patch_len: 24      # T=150 → 토큰 11개 (꼬리 6프레임 손실)
     stride: 12

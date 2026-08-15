@@ -92,12 +92,36 @@ def make_loaders(X, y, fold, batch_size):
     )
 
 
-def class_weights(y_train, n_classes=2):
+def class_weights(y_train, n_classes=2, subject_id=None, mode="window"):
     """역빈도 가중치. 분모의 n_classes 덕에 평균이 1.0이 되어 손실 스케일이 유지되므로
     learning rate를 다시 잡을 필요가 없다.
 
-    모달마다 불균형 정도가 다르므로(필기 1:1.77 · 음성 1:1.01) 반드시 따로 준다.
+    mode="window" (기존)
+        윈도우 라벨을 센다. 필기에서는 이것이 뒤집혀 있다.
+
+            윈도우  HC 4,867 : PD 8,607   → 가중치 HC 1.384 : PD 0.783
+            사람    HC    35 : PD    26   → 실제로는 환자가 소수
+
+        환자가 느리게 그려 녹음이 길고 윈도우가 1인당 2.1배 나온다. 그래서 모델은
+        환자를 "다수"로 보고 가중치를 깎는데, 사람 기준으로는 환자가 소수다.
+        결과적으로 판정이 정상 쪽으로 밀려 민감도가 떨어진다(실측 0.35~0.96).
+        그 여파가 판정 보류에서 드러난다 — 경계에 몰린 환자가 먼저 보류된다.
+
+    mode="subject" (교정)
+        사람당 1표로 센다. 판정 단위가 사람이므로 가중치도 사람을 세는 것이 맞다.
+        윈도우가 몇 개 나왔는지는 녹음 길이의 문제이지 유병률이 아니다.
+
+    mode="none"
+        가중치를 주지 않는다. 위 둘의 대조군.
     """
+    if mode == "none":
+        return np.ones(n_classes, dtype=float)
+    if mode == "subject":
+        if subject_id is None:
+            raise ValueError("mode='subject'에는 subject_id가 필요합니다.")
+        # 한 사람은 라벨이 하나이므로 첫 윈도우의 라벨을 그 사람의 표로 쓴다
+        _, first = np.unique(subject_id, return_index=True)
+        y_train = y_train[first]
     cnt = np.bincount(y_train, minlength=n_classes)
     return cnt.sum() / (n_classes * np.maximum(cnt, 1))
 
