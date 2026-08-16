@@ -50,6 +50,7 @@ BASELINE = {
     "voice_mel": "voice_d64L6_s{seed}.csv",
     "ab": "hw_d64L6_s{seed}.csv",
     "class_weight": "hw_d64L6_s{seed}.csv",
+    "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
     "shared_v2": "hw-voice_d64L6_s{seed}.csv",
 }

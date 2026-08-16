@@ -133,6 +133,15 @@ AXES = {
         ("s9mel20", "voice", ["--voice-patch", "24", "--voice-stride", "9",
                               "--voice-channels", MEL20, "--save-probs"]),
     ],
+    # d_model을 v2 기준에서 다시 잰다. 앞의 d_model 축은 v1(음성 80밴드)에서 쟀는데,
+    # v2가 새 기준선이 됐으므로 그 위에서도 같은 결론이 나오는지 확인해야 한다.
+    # 음성이 20밴드라 회당 25분 -> 9분으로 줄어든다.
+    "d_model_v2": [
+        ("d32", "hw,voice", ["--d-model", "32", "--voice-patch", "24", "--voice-stride", "9",
+                             "--voice-channels", MEL20]),
+        ("d128", "hw,voice", ["--d-model", "128", "--voice-patch", "24", "--voice-stride", "9",
+                              "--voice-channels", MEL20]),
+    ],
     # 위 설정으로 공유 모델을 다시 세운다. 기준선 전체가 이 값으로 갱신된다.
     # 필기 쪽은 손대지 않으므로 "음성 설정만 바뀌었을 때 공유 효과가 어떻게 되는가"를
     # 그대로 읽을 수 있다.
@@ -154,6 +163,7 @@ BASELINE = {
     "voice_mel": "voice_d64L6_s{seed}.csv",
     "ab": "hw_d64L6_s{seed}.csv",        # A(3채널)의 비교 대상은 6채널이다
     "class_weight": "hw_d64L6_s{seed}.csv",
+    "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
     "shared_v2": "hw-voice_d64L6_s{seed}.csv",
 }
