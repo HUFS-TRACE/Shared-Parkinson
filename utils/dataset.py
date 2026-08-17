@@ -57,16 +57,31 @@ def summarize(name, X, y, subject_id):
             f"  (1인당 최소 {per.min()} / 중앙 {int(np.median(per))} / 최대 {per.max()})")
 
 
-def subject_kfold(subject_id, y, n_splits=5, val_size=0.1, seed=42, stratified=False):
+def subject_kfold(subject_id, y, n_splits=5, val_size=0.1, seed=42, stratified=False,
+                  shuffle=False):
     """피험자 단위 K-Fold. 같은 사람이 train/val/test에 걸치지 않는다.
 
     ⚠️ `stratified=False`(기본)인 GroupKFold는 **층화를 하지 않는다.** fold마다
        정상/환자 비율이 흔들릴 수 있고, 피험자가 적으면 한 fold가 단일 클래스가
        되는 것도 가능하다(실제로 합성 데이터에서 겪었다 — 정확도가 정확히 0.000).
        실데이터에서도 fold별 클래스 비율은 한 번 확인하는 편이 좋다.
+
+    shuffle — 시드가 분할을 바꾸는가 (이슈 #15)
+        `GroupKFold`에 shuffle을 주지 않으면 **완전히 결정적이다.** 그룹을 샘플 수
+        순으로 정렬해 fold 크기가 균등해지도록 배분하므로, 입력이 같으면 출력이 항상
+        같다. 실측으로 seed 42/1/7의 test 명단이 5/5 fold 동일했다.
+
+        그래서 shuffle=False 로 돌린 결과는 "초기화를 바꿔도 재현된다"까지만 보인다.
+        시드가 val 분할(GroupShuffleSplit)과 가중치 초기화만 바꾸기 때문이다.
+        "분할을 바꿔도 재현된다"를 말하려면 shuffle=True 가 필요하다.
+
+        기본값을 False로 둔 이유는 기존 결과를 그대로 재현할 수 있게 하려는 것이다.
+        **두 설정의 결과를 같은 표에 섞으면 안 된다** — 짝 t-검정이 무효가 된다.
     """
     splitter = (StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-                if stratified else GroupKFold(n_splits=n_splits))
+                if stratified else
+                GroupKFold(n_splits=n_splits,
+                           **(dict(shuffle=True, random_state=seed) if shuffle else {})))
     folds = []
     for train_val_idx, test_idx in splitter.split(np.arange(len(y)), y, groups=subject_id):
         gss = GroupShuffleSplit(n_splits=1, test_size=val_size, random_state=seed)

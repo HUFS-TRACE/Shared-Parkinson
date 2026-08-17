@@ -79,6 +79,10 @@ def parse_args():
     p.add_argument("--pair-mode", choices=["longest", "shortest"])
     p.add_argument("--stratified", action="store_true",
                    help="StratifiedGroupKFold 사용 (기본 GroupKFold는 층화 안 함)")
+    p.add_argument("--split-shuffle", action="store_true",
+                   help="시드가 fold 분할까지 바꾸게 한다. 이것 없이는 GroupKFold가 "
+                        "결정적이라 세 시드가 같은 분할을 쓴다 (이슈 #15). "
+                        "⚠️ 켠 결과와 끈 결과를 같은 표에 섞지 말 것")
     p.add_argument("--smoke-test", action="store_true",
                    help="합성 데이터로 파이프라인만 점검 (실제 npz 불필요)")
     p.add_argument("--out", help="결과 CSV 경로. 기본은 results/<태그>.csv")
@@ -106,6 +110,8 @@ def load_config(args):
             cfg[section][key] = v
     if args.stratified:
         cfg["split"]["stratified"] = True
+    if args.split_shuffle:
+        cfg["split"]["shuffle"] = True
     if args.hw_path:
         cfg["data"]["hw_path"] = args.hw_path
     if args.voice_path:
@@ -305,8 +311,12 @@ def main():
         f"_{m}p{mcfg['modalities'][m]['patch_len']}s{mcfg['modalities'][m]['stride']}"
         for m in args.modalities
         if getattr(args, f"{m}_patch", None) or getattr(args, f"{m}_stride", None))
+    # 설정을 파일명에 남긴다. 특히 분할(_sh)이 다른 결과가 같은 이름으로 섞이는 것이
+    # 가장 위험하다 — 짝 t-검정이 조용히 무효가 된다.
     opt_tag = (f"_h{args.head}" if args.head else "") + \
-              (f"_w{args.max_windows}" if args.max_windows else "")
+              (f"_w{args.max_windows}" if args.max_windows else "") + \
+              (f"_cw{args.class_weight}" if args.class_weight != "window" else "") + \
+              ("_sh" if cfg["split"].get("shuffle") else "")
     out = Path(args.out) if args.out else result_dir / (
         f"{'smoke_' if args.smoke_test else ''}"
         f"{'-'.join(args.modalities)}_d{mcfg['shared_encoder']['d_model']}"
@@ -332,7 +342,8 @@ def main():
 
     folds = {m: subject_kfold(d["subject_id"], d["y"], n_splits=cfg["split"]["n_folds"],
                               val_size=cfg["split"]["val_size"], seed=seed,
-                              stratified=cfg["split"]["stratified"])
+                              stratified=cfg["split"]["stratified"],
+                              shuffle=cfg["split"].get("shuffle", False))
              for m, d in data.items()}
 
     if args.max_windows:

@@ -48,13 +48,34 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent
-SEEDS = (42, 1, 7)
+
+# 시드는 **미리 정해 둔다.** 3개를 돌려 보고 4·5번째를 고르면 결과를 보고 고르는 것이
+# 되어 리뷰에서 문제가 된다. "널리 쓰이는 값 중 작은 것부터"라는 규칙으로 정했다.
+SEEDS = (42, 1, 7, 0, 123)
+SEEDS_CORE = (42, 1, 7)          # 1차로 돌릴 3개
 
 # 4칸 간격 20밴드. 인접 밴드 |r|=0.64, 거리 4에서 0.45로 떨어진다(analyze_corr.py).
 MEL20 = ",".join(str(i) for i in range(0, 80, 4))
 
 # (축, 라벨, 모달, 추가인자)  — 기준 설정은 이미 돌렸으므로 넣지 않는다
 AXES = {
+    # ── 기준선 ──
+    # 분할을 바꾸면(--split-shuffle) 기준선도 다시 세워야 한다. 기존 hw_d64L6_*.csv
+    # 등은 옛 분할에서 나온 값이라 섞어 쓸 수 없다. 확률까지 저장해 유보·캐스케이드·
+    # 임계값 분석이 재학습 없이 돌게 한다.
+    "base": [
+        ("hw", "hw", ["--save-probs"]),                                # 필기 단독 6채널
+        ("hw3", "hw", ["--hw-channels", "3,2,1", "--save-probs"]),     # 센서 축 · 캐스케이드
+        ("voice", "voice", ["--voice-patch", "24", "--voice-stride", "9",
+                            "--voice-channels", MEL20, "--save-probs"]),
+        ("shared", "hw,voice", ["--voice-patch", "24", "--voice-stride", "9",
+                                "--voice-channels", MEL20, "--save-probs"]),
+    ],
+    # ①·⑦의 "고치기 전" 기준선. 음성 80밴드 p24/s12 — 꼬리 6프레임을 버리던 설정이다.
+    # 회당 22분으로 비싸서 tier 2로 미뤘다. tier 1 주장에는 필요하지 않다.
+    "base_v1": [
+        ("voice1", "voice", ["--save-probs"]),
+    ],
     # d_model만. 공유 파라미터라 공유 모델에서 잰다 (기준 d64)
     "d_model": [
         ("d32", "hw,voice", ["--d-model", "32"]),
@@ -153,6 +174,8 @@ AXES = {
 
 # 패칭 축은 단독 모델이라 비교 기준도 단독이어야 한다. 이미 있는 CSV들이다.
 BASELINE = {
+    "base": None,          # 기준선 자체 — 맞댈 대상이 없다
+    "base_v1": None,
     "d_model": "hw-voice_d64L6_s{seed}.csv",
     "hw_patch": "hw_d64L6_s{seed}.csv",
     "hw_stride": "hw_d64L6_s{seed}.csv",
@@ -169,57 +192,154 @@ BASELINE = {
 }
 
 
-def out_name(axis, label, seed):
-    """축·설정·시드로 파일명을 직접 정한다.
+# 끊어서 돌리기 위한 묶음. 앞 tier가 뒤 tier의 전제다 — 뒤 tier의 비교 기준이 앞에 있다.
+TIERS = {
+    1: ["base"],                                                  # 논문 주 주장 전부
+    2: ["base_v1", "voice_stride", "voice_mel", "d_model_v2"],     # ①⑦ + d_model
+    3: ["head", "window_cap", "hw_patch", "hw_stride"],            # "튜닝은 영향 없다"
+}
+
+# 분할을 바꾸면(--split-shuffle) 옛 기준선 CSV를 쓸 수 없다. 그때 무엇과 맞대나.
+# --rebase 를 주면 BASELINE 대신 이 표를 쓴다.
+REBASE = {
+    "hw_patch": "base_hw", "hw_stride": "base_hw",
+    "head": "base_hw", "window_cap": "base_hw", "class_weight": "base_hw",
+    "ab": "base_hw",                       # 3채널의 상대는 6채널이다
+    "voice_stride": "base_v1_voice1",      # ① 고치기 전 설정과 맞댄다
+    "voice_mel": "base_v1_voice1",         # ⑦ 도 마찬가지
+    "voice_patch": "base_voice",
+    "d_model": "base_shared", "d_model_v2": "base_shared",
+    "voice_v2": "base_v1_voice1", "shared_v2": "base_shared",
+}
+
+# 실측 회당 소요(분). ETA용이라 정확할 필요는 없고 감만 주면 된다.
+MINUTES = {"base": 6, "base_v1": 22, "ab": 3, "voice_stride": 6, "voice_mel": 4,
+           "d_model_v2": 11, "head": 5, "window_cap": 3, "hw_patch": 7,
+           "hw_stride": 7, "d_model": 30, "voice_patch": 6, "class_weight": 5,
+           "voice_v2": 6, "shared_v2": 9}
+
+
+def out_name(axis, label, seed, tag):
+    """축·설정·시드로 파일명을 정한다.
 
     train.py가 붙이는 자동 이름을 여기서 재현하려 들면, 인자를 하나 추가할 때마다
     양쪽을 같이 고쳐야 하고 어긋나면 조용히 덮어쓴다. --out으로 못박는 편이 안전하다.
+
+    tag가 접두사다. **분할을 바꾸면 반드시 새 tag를 써야 한다** — 파일명이 겹치면
+    "이미 있음"으로 건너뛰고, 두 분할의 값이 한 표에 섞여 짝 t-검정이 무효가 된다.
     """
-    return f"sw_{axis}_{label}_s{seed}.csv"
+    return f"{tag}_{axis}_{label}_s{seed}.csv"
+
+
+def fmt(minutes):
+    m = int(round(minutes))
+    return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
 
 
 def main():
-    ap = argparse.ArgumentParser(description="patch·stride·d_model OFAT 스윕")
-    ap.add_argument("--axis", nargs="*", default=list(AXES), choices=list(AXES))
-    ap.add_argument("--seeds", nargs="*", type=int, default=list(SEEDS))
-    ap.add_argument("--dry", action="store_true", help="명령만 출력하고 돌리지 않는다")
+    ap = argparse.ArgumentParser(description="OFAT 스윕 — tier로 끊어 돌린다")
+    ap.add_argument("--tier", nargs="*", type=int, choices=sorted(TIERS),
+                    help="묶음 단위로 돌린다. 여러 개 주면 순서대로")
+    ap.add_argument("--axis", nargs="*", choices=list(AXES),
+                    help="축을 직접 지정 (--tier와 같이 쓰면 합집합)")
+    ap.add_argument("--seeds", nargs="*", type=int, default=list(SEEDS_CORE),
+                    help="기본은 1차 3개. 미리 정해 둔 전체는 SEEDS 참고")
+    ap.add_argument("--tag", default="sw",
+                    help="결과 파일 접두사. 분할을 바꾸면 반드시 새 값을 줄 것")
+    ap.add_argument("--split-shuffle", action="store_true",
+                    help="시드가 fold 분할까지 바꾸게 한다 (이슈 #15)")
+    ap.add_argument("--rebase", action="store_true",
+                    help="비교 기준을 base 축 산출물로 바꾼다. --split-shuffle과 같이 쓴다")
+    ap.add_argument("--dry", action="store_true", help="계획만 출력하고 돌리지 않는다")
     args = ap.parse_args()
 
+    axes = [a for t in sorted(args.tier or []) for a in TIERS[t]]
+    axes += [a for a in (args.axis or []) if a not in axes]
+    if not axes:
+        axes = list(AXES)
+
+    # 분할이 다른 결과가 같은 파일명으로 섞이는 것이 이 스크립트에서 가장 위험하다.
+    # 조용히 잘못되기 때문에 아예 실행을 막는다.
+    if args.split_shuffle and args.tag == "sw":
+        raise SystemExit(
+            "--split-shuffle 을 쓰면서 --tag 를 기본값으로 두면, 옛 분할 결과를\n"
+            "'이미 있음'으로 건너뛰고 두 분할의 값이 한 표에 섞입니다.\n"
+            "짝 t-검정이 조용히 무효가 됩니다. --tag sw2 처럼 새 접두사를 주세요.")
+
+    base_of = REBASE if args.rebase else None
     jobs = []
-    for ax in args.axis:
+    for ax in axes:
         for label, modal, extra in AXES[ax]:
             for seed in args.seeds:
-                csv = ROOT / "results" / out_name(ax, label, seed)
+                csv = ROOT / "results" / out_name(ax, label, seed, args.tag)
                 jobs.append((ax, label, modal, extra, seed, csv))
 
     todo = [j for j in jobs if not j[5].exists()]
-    print(f"총 {len(jobs)}개 · 이미 있음 {len(jobs) - len(todo)}개 · 돌릴 것 {len(todo)}개")
+    print(f"tier {args.tier or '-'} · 축 {len(axes)}개 · 시드 {args.seeds} · tag={args.tag}"
+          + ("  [분할 섞기 ON]" if args.split_shuffle else ""))
+    print(f"총 {len(jobs)}개 · 이미 있음 {len(jobs) - len(todo)}개 · 돌릴 것 {len(todo)}개"
+          f" · 예상 {fmt(sum(MINUTES.get(j[0], 6) for j in todo))}")
+
+    # tier별 소요를 미리 보여준다 — 어디서 끊을지 정하기 위해
+    if len(axes) > 1:
+        print()
+        for t, tax in sorted(TIERS.items()):
+            mine = [j for j in todo if j[0] in tax]
+            if mine:
+                print(f"  tier {t}: {len(mine):>3}회  "
+                      f"{fmt(sum(MINUTES.get(j[0], 6) for j in mine)):>7}"
+                      f"   {', '.join(tax)}")
+        etc = [j for j in todo if not any(j[0] in tax for tax in TIERS.values())]
+        if etc:
+            print(f"  기타  : {len(etc):>3}회  "
+                  f"{fmt(sum(MINUTES.get(j[0], 6) for j in etc)):>7}")
     if not todo:
-        print("모두 완료돼 있습니다.")
+        print("\n모두 완료돼 있습니다.")
         return
 
-    missing = {ax for ax in args.axis
-               for s in args.seeds
-               if not (ROOT / "results" / BASELINE[ax].format(seed=s)).exists()}
-    if missing:
-        print(f"⚠️ 비교 기준 CSV가 없는 축: {sorted(missing)} — 스윕해도 맞댈 대상이 없습니다")
+    if base_of:
+        miss = sorted({ax for ax in axes if ax in base_of for sd in args.seeds
+                       if not (ROOT / "results" /
+                               f"{args.tag}_{base_of[ax]}_s{sd}.csv").exists()})
+        if miss:
+            print(f"\n⚠️ 비교 기준이 아직 없는 축: {miss}")
+            print("   tier 1(base)을 먼저 돌리면 채워집니다. 학습 자체는 진행됩니다.")
 
-    for ax, label, modal, extra, seed, csv in todo:
+    print("\n중단은 Ctrl+C. 끝난 회차는 CSV로 남고, 같은 명령으로 다시 돌리면 이어서 갑니다.")
+    done = 0.0
+    for i, (ax, label, modal, extra, seed, csv) in enumerate(todo, 1):
         cmd = [sys.executable, str(ROOT / "train.py"),
-               "--modalities", modal, "--seed", str(seed),
-               "--out", str(csv)] + extra
-        print(f"\n{'=' * 70}\n[{ax}/{label}] seed {seed}  → {csv.name}\n  "
-              + " ".join(cmd[1:]))
+               "--modalities", modal, "--seed", str(seed), "--out", str(csv)] + extra
+        if args.split_shuffle:
+            cmd.append("--split-shuffle")
+        left = sum(MINUTES.get(j[0], 6) for j in todo[i - 1:])
+        print(f"\n{'=' * 70}")
+        print(f"[{i}/{len(todo)}] {ax}/{label} seed {seed} → {csv.name}"
+              f"   (남은 예상 {fmt(left)})")
+        print("  " + " ".join(cmd[1:]))
         if args.dry:
             continue
         t0 = time.time()
-        r = subprocess.run(cmd, cwd=ROOT)
+        try:
+            r = subprocess.run(cmd, cwd=ROOT)
+        except KeyboardInterrupt:
+            # 쓰다 만 CSV가 남으면 다음 실행이 "완료"로 착각한다
+            if csv.exists():
+                csv.unlink()
+                print(f"\n  중단 — 쓰다 만 {csv.name} 을 지웠습니다.")
+            print(f"  {i - 1}/{len(todo)}회 완료 ({fmt(done)}). 같은 명령으로 이어서 갑니다.")
+            return
         if r.returncode != 0:
+            if csv.exists():
+                csv.unlink()
             print(f"  ❌ 실패 (코드 {r.returncode}) — 여기서 멈춥니다")
             return
-        print(f"  ✅ {(time.time() - t0) / 60:.1f}분")
+        done += (time.time() - t0) / 60
+        print(f"  ✅ {(time.time() - t0) / 60:.1f}분  (누적 {fmt(done)})")
 
-    print("\n끝났습니다. 축마다 기준과 시드를 짝지어 비교하세요.")
+    print(f"\n끝났습니다. 총 {fmt(done)}")
+    print(f"집계: python analyze_sweep.py --tag {args.tag}"
+          + (" --rebase" if args.rebase else ""))
 
 
 if __name__ == "__main__":

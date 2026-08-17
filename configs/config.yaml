@@ -22,6 +22,12 @@ split:
   val_size: 0.1
   seed: 42
   stratified: false     # true면 StratifiedGroupKFold. 기본 GroupKFold는 층화를 안 한다
+  # 시드가 fold 분할까지 바꾸는가 (이슈 #15)
+  #   false면 GroupKFold가 완전히 결정적이라 모든 시드가 같은 분할을 쓴다.
+  #   실측: seed 42/1/7의 test 명단이 5/5 fold 동일. 그 조건에서 낸 t값은
+  #   "초기화를 바꿔도 재현된다"까지만 보인 것이다.
+  #   ⚠️ true/false 결과를 같은 표에 섞으면 짝 t-검정이 무효가 된다.
+  shuffle: false
 
 output:
   result_dir: results

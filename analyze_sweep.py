@@ -77,11 +77,11 @@ def paired_t(d):
     return float(d.mean() / (d.std(ddof=1) / np.sqrt(len(d))))
 
 
-def collect():
-    """sw_<축>_<설정>_s<시드>.csv 를 (축, 설정) → {시드: 경로} 로 모은다."""
+def collect(tag="sw"):
+    """<tag>_<축>_<설정>_s<시드>.csv 를 (축, 설정) → {시드: 경로} 로 모은다."""
     got = defaultdict(dict)
-    for f in sorted(RES.glob("sw_*.csv")):
-        stem = f.stem[3:]                       # 'sw_' 제거
+    for f in sorted(RES.glob(f"{tag}_*.csv")):
+        stem = f.stem[len(tag) + 1:]
         head, _, seed = stem.rpartition("_s")
         for ax in sorted(BASELINE, key=len, reverse=True):
             if head.startswith(ax + "_"):
@@ -93,13 +93,23 @@ def collect():
 def main():
     ap = argparse.ArgumentParser(description="스윕 결과 집계")
     ap.add_argument("--axis", nargs="*", default=None)
+    ap.add_argument("--tag", default="sw",
+                    help="읽을 결과 파일 접두사. run_sweep.py의 --tag와 같아야 한다")
+    ap.add_argument("--rebase", action="store_true",
+                    help="비교 기준을 base 축 산출물로 본다. run_sweep --rebase 와 짝")
     args = ap.parse_args()
 
-    got = collect()
+    got = collect(args.tag)
+    # 분할을 바꿨으면 옛 기준선 CSV를 쓸 수 없다. base 축 산출물로 갈아탄다.
+    if args.rebase:
+        from run_sweep import REBASE
+        for ax, base in REBASE.items():
+            BASELINE[ax] = f"{args.tag}_{base}_s{{seed}}.csv"
     if not got:
-        raise SystemExit("results/sw_*.csv 가 없습니다.")
+        raise SystemExit(f"results/{args.tag}_*.csv 가 없습니다.")
 
     axes = sorted({ax for ax, _ in got} & set(args.axis or BASELINE))
+    axes = [a for a in axes if BASELINE.get(a)]      # 기준선 자체(base)는 맞댈 것이 없다
     for ax in axes:
         modal = AXIS_MODAL.get(ax)
         print("=" * 84)
