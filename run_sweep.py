@@ -71,6 +71,19 @@ AXES = {
         ("shared", "hw,voice", ["--voice-patch", "24", "--voice-stride", "9",
                                 "--voice-channels", MEL20, "--save-probs"]),
     ],
+    # ③ 깊이 축 — 층을 몇 개 써야 하는가. 기준은 base/hw (L6)다.
+    #
+    #   기존 t=0.51("정적 L1 ≈ L6")은 다른 레포에서 옛 분할로 낸 값이다.
+    #   7절에서 "옛 분할 값은 신뢰할 수 없다"고 쓰면서 3절이 그 값을 쓰면 자기모순이다.
+    #   세 축을 같은 조건에서 재기 위해 이 레포·새 분할로 다시 잰다.
+    #
+    #   Early Exit의 전제는 "층을 더 쌓으면 나아진다"이다. 그것이 성립하지 않으면
+    #   층을 골라 멈출 이유가 없다. 그 전제를 직접 확인하는 축이다.
+    "depth": [
+        ("L1", "hw", ["--n-layers", "1", "--save-probs"]),
+        ("L2", "hw", ["--n-layers", "2"]),
+        ("L3", "hw", ["--n-layers", "3"]),
+    ],
     # ①·⑦의 "고치기 전" 기준선. 음성 80밴드 p24/s12 — 꼬리 6프레임을 버리던 설정이다.
     # 회당 22분으로 비싸서 tier 2로 미뤘다. tier 1 주장에는 필요하지 않다.
     "base_v1": [
@@ -186,6 +199,7 @@ BASELINE = {
     "voice_mel": "voice_d64L6_s{seed}.csv",
     "ab": "hw_d64L6_s{seed}.csv",        # A(3채널)의 비교 대상은 6채널이다
     "class_weight": "hw_d64L6_s{seed}.csv",
+    "depth": "hw_d64L6_s{seed}.csv",
     "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
     "shared_v2": "hw-voice_d64L6_s{seed}.csv",
@@ -195,6 +209,7 @@ BASELINE = {
 # 끊어서 돌리기 위한 묶음. 앞 tier가 뒤 tier의 전제다 — 뒤 tier의 비교 기준이 앞에 있다.
 TIERS = {
     1: ["base"],                                                  # 논문 주 주장 전부
+    0: ["depth"],                                                 # 깊이 축 (3절)
     2: ["base_v1", "voice_stride", "voice_mel", "d_model_v2"],     # ①⑦ + d_model
     3: ["head", "window_cap", "hw_patch", "hw_stride"],            # "튜닝은 영향 없다"
 }
@@ -204,7 +219,8 @@ TIERS = {
 REBASE = {
     "hw_patch": "base_hw", "hw_stride": "base_hw",
     "head": "base_hw", "window_cap": "base_hw", "class_weight": "base_hw",
-    "ab": "base_hw",                       # 3채널의 상대는 6채널이다
+    "ab": "base_hw",                       # 3채널의 상대는 6채널
+    "depth": "base_hw",                    # L1·L2·L3 의 상대는 L6이다
     "voice_stride": "base_v1_voice1",      # ① 고치기 전 설정과 맞댄다
     "voice_mel": "base_v1_voice1",         # ⑦ 도 마찬가지
     "voice_patch": "base_voice",
@@ -213,7 +229,7 @@ REBASE = {
 }
 
 # 실측 회당 소요(분). ETA용이라 정확할 필요는 없고 감만 주면 된다.
-MINUTES = {"base": 6, "base_v1": 22, "ab": 3, "voice_stride": 6, "voice_mel": 4,
+MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "ab": 3, "voice_stride": 6, "voice_mel": 4,
            "d_model_v2": 11, "head": 5, "window_cap": 3, "hw_patch": 7,
            "hw_stride": 7, "d_model": 30, "voice_patch": 6, "class_weight": 5,
            "voice_v2": 6, "shared_v2": 9}

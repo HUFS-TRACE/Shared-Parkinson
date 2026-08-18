@@ -40,6 +40,8 @@ METRICS = (("subject_acc_soft", "피험자"), ("roc_auc", "AUC"), ("window_acc",
 
 # run_sweep.py의 BASELINE과 같아야 한다
 BASELINE = {
+    "base": None,          # 기준선 자체 — 맞댈 대상이 없다
+    "base_v1": None,
     "d_model": "hw-voice_d64L6_s{seed}.csv",
     "hw_patch": "hw_d64L6_s{seed}.csv",
     "hw_stride": "hw_d64L6_s{seed}.csv",
@@ -50,13 +52,14 @@ BASELINE = {
     "voice_mel": "voice_d64L6_s{seed}.csv",
     "ab": "hw_d64L6_s{seed}.csv",
     "class_weight": "hw_d64L6_s{seed}.csv",
+    "depth": "hw_d64L6_s{seed}.csv",
     "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
     "shared_v2": "hw-voice_d64L6_s{seed}.csv",
 }
 # 축이 어느 모달을 건드리는가 — 기준 CSV에 두 모달이 다 있을 때 고르기 위해
 AXIS_MODAL = {"hw_patch": "hw", "hw_stride": "hw", "head": "hw",
-              "window_cap": "hw", "ab": "hw", "voice_v2": "voice",
+              "window_cap": "hw", "ab": "hw", "voice_v2": "voice", "depth": "hw",
               "class_weight": "hw",
               "voice_patch": "voice", "voice_stride": "voice", "voice_mel": "voice"}
 
