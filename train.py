@@ -62,9 +62,27 @@ def parse_args():
     p.add_argument("--lr", type=float); p.add_argument("--patience", type=int)
     p.add_argument("--n-folds", type=int); p.add_argument("--seed", type=int)
     p.add_argument("--d-model", type=int); p.add_argument("--n-layers", type=int)
+    # 패칭 스윕용. d_model은 인코더가 공유라 모달 공통이지만, patch/stride는
+    # 모달별 입구(PatchEmbedding)에 있어 따로 준다.
+    p.add_argument("--hw-patch", type=int); p.add_argument("--hw-stride", type=int)
+    p.add_argument("--voice-patch", type=int); p.add_argument("--voice-stride", type=int)
+    p.add_argument("--head", choices=["linear", "perch", "mlp"],
+                   help="분류 헤드. 채널 상관을 분류기 하나로 감당할 수 있는지 보는 "
+                        "대조군 (models/classifier.py 주석 참고)")
+    p.add_argument("--class-weight", choices=["window", "subject", "none"],
+                   default="window",
+                   help="손실 클래스 가중치를 무엇으로 세나. window(기존)는 필기에서 "
+                        "환자 윈도우가 2.1배라 가중치가 뒤집힌다 (utils/dataset.py 주석)")
+    p.add_argument("--max-windows", type=int,
+                   help="사람당 윈도우 상한. 녹음이 긴 사람이 학습을 지배하는 것을 막는다. "
+                        "넘치면 시간축 균등 간격으로 뽑는다")
     p.add_argument("--pair-mode", choices=["longest", "shortest"])
     p.add_argument("--stratified", action="store_true",
                    help="StratifiedGroupKFold 사용 (기본 GroupKFold는 층화 안 함)")
+    p.add_argument("--split-shuffle", action="store_true",
+                   help="시드가 fold 분할까지 바꾸게 한다. 이것 없이는 GroupKFold가 "
+                        "결정적이라 세 시드가 같은 분할을 쓴다 (이슈 #15). "
+                        "⚠️ 켠 결과와 끈 결과를 같은 표에 섞지 말 것")
     p.add_argument("--smoke-test", action="store_true",
                    help="합성 데이터로 파이프라인만 점검 (실제 npz 불필요)")
     p.add_argument("--out", help="결과 CSV 경로. 기본은 results/<태그>.csv")
@@ -92,6 +110,8 @@ def load_config(args):
             cfg[section][key] = v
     if args.stratified:
         cfg["split"]["stratified"] = True
+    if args.split_shuffle:
+        cfg["split"]["shuffle"] = True
     if args.hw_path:
         cfg["data"]["hw_path"] = args.hw_path
     if args.voice_path:
@@ -100,6 +120,13 @@ def load_config(args):
         mcfg["shared_encoder"]["d_model"] = args.d_model
     if args.n_layers:
         mcfg["shared_encoder"]["n_layers"] = args.n_layers
+    if args.head:
+        mcfg["shared_encoder"]["head"] = args.head
+    for m in mcfg["modalities"]:
+        for cli, key in (("patch", "patch_len"), ("stride", "stride")):
+            v = getattr(args, f"{m}_{cli}", None)
+            if v:
+                mcfg["modalities"][m][key] = v
     return cfg, mcfg
 
 
@@ -134,6 +161,42 @@ def gather_data(args, cfg):
 
         data[m] = dict(X=X, y=y, subject_id=sid)
     return data
+
+
+def cap_train_windows(folds, data, n):
+    """train 인덱스만 사람당 n개로 줄인다. val·test는 건드리지 않는다.
+
+    왜 상한이 필요한가
+        필기는 사람이 35:26(정상:환자)인데 윈도우는 4,867:8,607로 비율이 뒤집힌다.
+        환자가 느리게 그려 녹음이 길고, 그래서 윈도우가 1인당 2.4배 나온다.
+        질병 신호가 데이터 불균형으로 새어 들어가는 셈이다. 손실 가중치
+        (class_weights)로는 못 잡는다 — 그건 라벨 비율만 보고 사람은 안 본다.
+
+    왜 train에만 거는가
+        test까지 자르면 평가 대상 자체가 달라져, 상한을 건 모델과 안 건 모델을
+        **다른 자로** 재게 된다. 윈도우 정확도와 AUC가 특히 그렇다. 상한은 학습
+        데이터의 성질을 고치려는 것이므로 train에만 걸어야 비교가 성립한다.
+
+    왜 앞에서 N개가 아니라 균등 간격인가
+        과제 앞부분만 남기면 "천천히 시작해 점점 흔들린다" 같은 후반부 신호를
+        통째로 버린다. 원래 인덱스 순서가 녹음 시간 순이므로 그 위에서 균등하게 뽑는다.
+    """
+    for m, per_fold in folds.items():
+        sid = data[m]["subject_id"]
+        new, before, after = [], 0, 0
+        for tr, va, te in per_fold:
+            keep = []
+            for s in np.unique(sid[tr]):
+                w = tr[sid[tr] == s]                 # 원래 순서 = 녹음 시간 순
+                keep.append(w if len(w) <= n else
+                            w[np.linspace(0, len(w) - 1, n).astype(int)])
+            keep = np.sort(np.concatenate(keep))
+            before, after = before + len(tr), after + len(keep)
+            new.append((keep, va, te))
+        folds[m] = new
+        print(f"  [{m}] train 윈도우 상한 {n}개 → fold 합계 {before}개에서 {after}개로 "
+              f"({after / before * 100:.0f}%) · val·test는 그대로")
+    return folds
 
 
 def build_specs(data, mcfg):
@@ -242,10 +305,22 @@ def main():
 
     result_dir = ROOT / cfg["output"]["result_dir"]
     result_dir.mkdir(parents=True, exist_ok=True)
+    # 패칭을 CLI로 바꿨으면 파일명에 남긴다. 안 그러면 스윕 결과가 같은 이름으로
+    # 서로를 덮어써서, 마지막 설정 하나만 남고도 알아채지 못한다.
+    patch_tag = "".join(
+        f"_{m}p{mcfg['modalities'][m]['patch_len']}s{mcfg['modalities'][m]['stride']}"
+        for m in args.modalities
+        if getattr(args, f"{m}_patch", None) or getattr(args, f"{m}_stride", None))
+    # 설정을 파일명에 남긴다. 특히 분할(_sh)이 다른 결과가 같은 이름으로 섞이는 것이
+    # 가장 위험하다 — 짝 t-검정이 조용히 무효가 된다.
+    opt_tag = (f"_h{args.head}" if args.head else "") + \
+              (f"_w{args.max_windows}" if args.max_windows else "") + \
+              (f"_cw{args.class_weight}" if args.class_weight != "window" else "") + \
+              ("_sh" if cfg["split"].get("shuffle") else "")
     out = Path(args.out) if args.out else result_dir / (
         f"{'smoke_' if args.smoke_test else ''}"
         f"{'-'.join(args.modalities)}_d{mcfg['shared_encoder']['d_model']}"
-        f"L{mcfg['shared_encoder']['n_layers']}_s{seed}.csv")
+        f"L{mcfg['shared_encoder']['n_layers']}{patch_tag}{opt_tag}_s{seed}.csv")
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -267,8 +342,12 @@ def main():
 
     folds = {m: subject_kfold(d["subject_id"], d["y"], n_splits=cfg["split"]["n_folds"],
                               val_size=cfg["split"]["val_size"], seed=seed,
-                              stratified=cfg["split"]["stratified"])
+                              stratified=cfg["split"]["stratified"],
+                              shuffle=cfg["split"].get("shuffle", False))
              for m, d in data.items()}
+
+    if args.max_windows:
+        folds = cap_train_windows(folds, data, args.max_windows)
 
     # GroupKFold는 층화를 하지 않으므로 fold별 클래스 비율을 찍어둔다
     print("\nfold별 클래스 분포 [정상, 환자]")
@@ -293,8 +372,11 @@ def main():
                                    cfg["train"]["batch_size"]) for m in data}
         criteria = {
             m: nn.CrossEntropyLoss(
-                weight=torch.tensor(class_weights(data[m]["y"][folds[m][fold][0]]),
-                                    dtype=torch.float32).to(device),
+                weight=torch.tensor(
+                    class_weights(data[m]["y"][folds[m][fold][0]],
+                                  subject_id=data[m]["subject_id"][folds[m][fold][0]],
+                                  mode=args.class_weight),
+                    dtype=torch.float32).to(device),
                 label_smoothing=cfg["train"]["label_smoothing"])
             for m in data
         }

@@ -57,16 +57,31 @@ def summarize(name, X, y, subject_id):
             f"  (1인당 최소 {per.min()} / 중앙 {int(np.median(per))} / 최대 {per.max()})")
 
 
-def subject_kfold(subject_id, y, n_splits=5, val_size=0.1, seed=42, stratified=False):
+def subject_kfold(subject_id, y, n_splits=5, val_size=0.1, seed=42, stratified=False,
+                  shuffle=False):
     """피험자 단위 K-Fold. 같은 사람이 train/val/test에 걸치지 않는다.
 
     ⚠️ `stratified=False`(기본)인 GroupKFold는 **층화를 하지 않는다.** fold마다
        정상/환자 비율이 흔들릴 수 있고, 피험자가 적으면 한 fold가 단일 클래스가
        되는 것도 가능하다(실제로 합성 데이터에서 겪었다 — 정확도가 정확히 0.000).
        실데이터에서도 fold별 클래스 비율은 한 번 확인하는 편이 좋다.
+
+    shuffle — 시드가 분할을 바꾸는가 (이슈 #15)
+        `GroupKFold`에 shuffle을 주지 않으면 **완전히 결정적이다.** 그룹을 샘플 수
+        순으로 정렬해 fold 크기가 균등해지도록 배분하므로, 입력이 같으면 출력이 항상
+        같다. 실측으로 seed 42/1/7의 test 명단이 5/5 fold 동일했다.
+
+        그래서 shuffle=False 로 돌린 결과는 "초기화를 바꿔도 재현된다"까지만 보인다.
+        시드가 val 분할(GroupShuffleSplit)과 가중치 초기화만 바꾸기 때문이다.
+        "분할을 바꿔도 재현된다"를 말하려면 shuffle=True 가 필요하다.
+
+        기본값을 False로 둔 이유는 기존 결과를 그대로 재현할 수 있게 하려는 것이다.
+        **두 설정의 결과를 같은 표에 섞으면 안 된다** — 짝 t-검정이 무효가 된다.
     """
     splitter = (StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-                if stratified else GroupKFold(n_splits=n_splits))
+                if stratified else
+                GroupKFold(n_splits=n_splits,
+                           **(dict(shuffle=True, random_state=seed) if shuffle else {})))
     folds = []
     for train_val_idx, test_idx in splitter.split(np.arange(len(y)), y, groups=subject_id):
         gss = GroupShuffleSplit(n_splits=1, test_size=val_size, random_state=seed)
@@ -92,12 +107,36 @@ def make_loaders(X, y, fold, batch_size):
     )
 
 
-def class_weights(y_train, n_classes=2):
+def class_weights(y_train, n_classes=2, subject_id=None, mode="window"):
     """역빈도 가중치. 분모의 n_classes 덕에 평균이 1.0이 되어 손실 스케일이 유지되므로
     learning rate를 다시 잡을 필요가 없다.
 
-    모달마다 불균형 정도가 다르므로(필기 1:1.77 · 음성 1:1.01) 반드시 따로 준다.
+    mode="window" (기존)
+        윈도우 라벨을 센다. 필기에서는 이것이 뒤집혀 있다.
+
+            윈도우  HC 4,867 : PD 8,607   → 가중치 HC 1.384 : PD 0.783
+            사람    HC    35 : PD    26   → 실제로는 환자가 소수
+
+        환자가 느리게 그려 녹음이 길고 윈도우가 1인당 2.1배 나온다. 그래서 모델은
+        환자를 "다수"로 보고 가중치를 깎는데, 사람 기준으로는 환자가 소수다.
+        결과적으로 판정이 정상 쪽으로 밀려 민감도가 떨어진다(실측 0.35~0.96).
+        그 여파가 판정 보류에서 드러난다 — 경계에 몰린 환자가 먼저 보류된다.
+
+    mode="subject" (교정)
+        사람당 1표로 센다. 판정 단위가 사람이므로 가중치도 사람을 세는 것이 맞다.
+        윈도우가 몇 개 나왔는지는 녹음 길이의 문제이지 유병률이 아니다.
+
+    mode="none"
+        가중치를 주지 않는다. 위 둘의 대조군.
     """
+    if mode == "none":
+        return np.ones(n_classes, dtype=float)
+    if mode == "subject":
+        if subject_id is None:
+            raise ValueError("mode='subject'에는 subject_id가 필요합니다.")
+        # 한 사람은 라벨이 하나이므로 첫 윈도우의 라벨을 그 사람의 표로 쓴다
+        _, first = np.unique(subject_id, return_index=True)
+        y_train = y_train[first]
     cnt = np.bincount(y_train, minlength=n_classes)
     return cnt.sum() / (n_classes * np.maximum(cnt, 1))
 
