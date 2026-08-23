@@ -159,6 +159,17 @@ AXES = {
         ("cwsubject", "hw", ["--class-weight", "subject", "--save-probs"]),
         ("cap150", "hw", ["--max-windows", "150", "--save-probs"]),
     ],
+    # 2-2 층별 표현 분석 — 층이 정보를 더하는가.
+    #
+    #   깊이 축에서 L1~L6이 구별되지 않았다. 그 이유를 표현 수준에서 본다.
+    #   L6 모델 하나에서 층별 pooled 표현을 꺼내 linear probe·CKA를 재고,
+    #   공유 모델에서는 두 모달 표현이 어느 층에서 갈라지는지도 본다.
+    #   필기·음성·공유 세 구성을 따로 학습해야 "입력이 무엇일 때"를 비교할 수 있다.
+    "layers": [
+        ("hw", "hw", ["--save-repr"]),
+        ("voice", "voice", ["--voice-patch", "24", "--voice-stride", "9", "--voice-channels", MEL20, "--save-repr"]),
+        ("shared", "hw,voice", ["--voice-patch", "24", "--voice-stride", "9", "--voice-channels", MEL20, "--save-repr"]),
+    ],
     # ①+⑦ 합본. 두 축이 따로는 이겼는데 같이 걸면 어떤지는 따로 재야 한다.
     #   stride 9  꼬리 손실 0 (토큰 11 → 15)
     #   mel20     4칸 간격 20밴드 (인접 |r|=0.64라 80개는 중복)
@@ -199,6 +210,7 @@ BASELINE = {
     "voice_mel": "voice_d64L6_s{seed}.csv",
     "ab": "hw_d64L6_s{seed}.csv",        # A(3채널)의 비교 대상은 6채널이다
     "class_weight": "hw_d64L6_s{seed}.csv",
+    "layers": None,      # 표현 분석 전용 — 맞댈 대상이 없다
     "depth": "hw_d64L6_s{seed}.csv",
     "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
@@ -229,7 +241,7 @@ REBASE = {
 }
 
 # 실측 회당 소요(분). ETA용이라 정확할 필요는 없고 감만 주면 된다.
-MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "ab": 3, "voice_stride": 6, "voice_mel": 4,
+MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "layers": 7, "ab": 3, "voice_stride": 6, "voice_mel": 4,
            "d_model_v2": 11, "head": 5, "window_cap": 3, "hw_patch": 7,
            "hw_stride": 7, "d_model": 30, "voice_patch": 6, "class_weight": 5,
            "voice_v2": 6, "shared_v2": 9}
