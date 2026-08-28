@@ -91,6 +91,12 @@ def parse_args():
                         "→ TiltX·압력·그립만. 센서 축 연산량 실험용")
     p.add_argument("--voice-channels",
                    help="음성 멜밴드 부분집합 (0-based, 쉼표)")
+    p.add_argument("--save-repr", action="store_true",
+                   help="층별 pooled 표현을 저장한다. 층이 정보를 더하는지(linear probe) "
+                        "표현이 바뀌는지(CKA) 재학습 없이 분석하기 위한 것")
+    p.add_argument("--repr-cap", type=int, default=40,
+                   help="사람당 저장할 윈도우 수 상한. float16으로도 전체를 담으면 "
+                        "수 GB가 되므로 시간축 균등 간격으로 뽑는다")
     p.add_argument("--save-probs", action="store_true",
                    help="윈도우별 P(환자)를 저장한다. 시간 축 Early Exit(윈도우 개수)의 "
                         "입력이며, 이후 단계는 재학습 없이 이 파일만 읽는다")
@@ -252,6 +258,85 @@ def save_probs(saved, data, tag, result_dir):
               f"(test {len(idx)} / val {len(cat['val_idx'])}, val 중복 {n_dup})")
 
 
+def extract_layers(model, modality, loader, device):
+    """층별 pooled 표현. → (n_layers, N, C*d_model) float16
+
+    `forward()`가 하는 것과 같은 계산을 층마다 끊어서 꺼낸다. 층을 직접 순회해도
+    되는 이유는 `nn.TransformerEncoder`를 `norm=None`으로 만들었기 때문이다
+    (norm이 있으면 마지막 층 뒤에 한 번 더 적용되므로 마지막 표현이 달라진다).
+
+    float16으로 내리는 이유는 용량이다. CKA와 linear probe에는 이 정밀도로 충분하다.
+    """
+    model.eval()
+    outs = None
+    with torch.no_grad():
+        for X, _ in loader:
+            X = X.to(device)
+            b, c, _ = X.shape
+            z = model.embeddings[modality](X)
+            per = []
+            for layer in model.encoder.layers:
+                z = layer(z)
+                # forward()와 같은 풀링: 패치 축 평균 → (B, C, d_model) → 평탄화
+                per.append(z.mean(dim=1).reshape(b, c, -1).flatten(1).cpu().half())
+            if outs is None:
+                outs = [[] for _ in per]
+            for i, p in enumerate(per):
+                outs[i].append(p)
+    return np.stack([torch.cat(o).numpy() for o in outs])
+
+
+def _cap_positions(idx, sid_all, cap):
+    """사람당 균등 간격으로 최대 cap개 위치만 남긴다. 앞에서 자르지 않는 이유는
+    과제 후반부 신호를 버리지 않기 위해서다."""
+    sid = sid_all[idx]
+    keep = []
+    for u in np.unique(sid):
+        w = np.nonzero(sid == u)[0]
+        keep.append(w if len(w) <= cap else
+                    w[np.linspace(0, len(w) - 1, cap).astype(int)])
+    return np.sort(np.concatenate(keep))
+
+
+def save_reprs(saved, data, tag, result_dir, cap):
+    """층별 표현을 모달별 npz로. test·val 표현을 **둘 다** 저장한다.
+
+    둘 다 필요한 이유
+        각 fold는 별도로 학습된 모델이라, fold끼리 표현의 좌표계가 다르다.
+        probe(analyze_layers.py)를 val에서 학습해 test에서 평가하려면 — 같은 fold의
+        모델이 만든 val 표현이 있어야 한다. test만 저장하면 fold를 넘어 데이터를
+        섞을 수밖에 없고, 그러면 좌표계가 다른 벡터들을 같은 열로 취급하는 것이라
+        신호가 사라진다(실측: probe 정확도가 우연 수준으로 떨어졌다).
+
+    사람당 윈도우를 cap개로 줄이는 이유
+        전체를 담으면 float16이라도 모달·시드마다 수백 MB가 된다.
+    """
+    for m, s in saved.items():
+        if not s["repr"]:
+            continue
+        out = result_dir / f"repr_{m}_{tag}.npz"
+        R = np.concatenate(s["repr"], axis=1)
+        idx = np.concatenate(s["idx"])
+        keep = _cap_positions(idx, data[m]["subject_id"], cap)
+        sid = data[m]["subject_id"][idx]
+
+        VR = np.concatenate(s["val_repr"], axis=1)
+        vidx = np.concatenate(s["val_idx"])
+        vkeep = _cap_positions(vidx, data[m]["subject_id"], cap)
+        vsid = data[m]["subject_id"][vidx]
+
+        np.savez_compressed(
+            out,
+            repr=R[:, keep], idx=idx[keep], fold=np.concatenate(s["fold"])[keep],
+            y=data[m]["y"][idx][keep], subject_id=sid[keep],
+            val_repr=VR[:, vkeep], val_idx=vidx[vkeep],
+            val_fold=np.concatenate(s["val_fold"])[vkeep],
+            val_y=data[m]["y"][vidx][vkeep], val_subject_id=vsid[vkeep])
+        print(f"  층별 표현 저장: {out.name}  "
+              f"test {R.shape[0]}층×{len(keep)}윈도우 · val {VR.shape[0]}층×{len(vkeep)}윈도우 "
+              f"× {R.shape[2]}차원 ({out.stat().st_size / 1e6:.0f} MB)")
+
+
 def train_fold(model, train_loaders, val_loaders, criteria, cfg, device, ckpt):
     """공동 학습 1 fold. 조기중단 기준은 **모달 val loss의 합**.
 
@@ -363,7 +448,7 @@ def main():
     epochs_used = []
     # 시간 축 Early Exit용 윈도우 확률. test는 fold를 가로질러 전체를 정확히 한 번씩
     # 덮지만, val은 fold마다 새로 떼므로 겹칠 수 있다. 그래서 fold 태그를 함께 남긴다.
-    saved = {m: {k: [] for k in ("prob", "idx", "fold",
+    saved = {m: {k: [] for k in ("prob", "idx", "fold", "repr", "val_repr",
                                  "val_prob", "val_idx", "val_fold")} for m in data}
     ckpt = result_dir / f"_tmp_{os.getpid()}.pt"
 
@@ -395,6 +480,23 @@ def main():
             for k, v in met.items():
                 acc[m][k].append(v)
 
+            if args.save_repr:
+                # test와 val 둘 다, **같은 fold의 모델**로 뽑는다. fold마다 모델이
+                # 다시 학습되므로 fold 0의 384차원과 fold 1의 384차원은 같은 좌표계가
+                # 아니다 — 다른 네트워크가 만든 벡터공간이다. probe를 학습할 때
+                # test(다른 fold 포함)를 섞어 쓰면 좌표계가 안 맞는 것을 하나로
+                # 취급하는 셈이라 신호가 씻겨나간다(실측: 정확도가 우연 수준으로 떨어짐).
+                # val→test를 같은 fold 안에서만 쓰면 이 문제가 없다 — 캘리브레이션을
+                # val에서 하는 것과 같은 이유다.
+                saved[m]["repr"].append(extract_layers(model, m, loaders[m][2], device))
+                saved[m]["val_repr"].append(extract_layers(model, m, loaders[m][1], device))
+                if not args.save_probs:
+                    saved[m]["idx"].append(te)
+                    saved[m]["fold"].append(np.full(len(te), fold))
+                    va = folds[m][fold][1]
+                    saved[m]["val_idx"].append(va)
+                    saved[m]["val_fold"].append(np.full(len(va), fold))
+
             if args.save_probs:
                 # 캘리브레이션(온도·사전확률 보정)은 val에서 정해야 한다. test에서
                 # 맞추면 테스트셋 피팅이고, fold마다 모델이 다르므로 fold별로 따로 구한다.
@@ -413,6 +515,8 @@ def main():
 
     if args.save_probs:
         save_probs(saved, data, out.stem, result_dir)
+    if args.save_repr:
+        save_reprs(saved, data, out.stem, result_dir, args.repr_cap)
 
     print(f"\n{'모달':<8}{'윈도우acc':>16}{'피험자 hard':>18}{'피험자 soft':>18}{'AUC':>16}")
     rows = []
