@@ -170,6 +170,17 @@ AXES = {
         ("voice", "voice", ["--voice-patch", "24", "--voice-stride", "9", "--voice-channels", MEL20, "--save-repr"]),
         ("shared", "hw,voice", ["--voice-patch", "24", "--voice-stride", "9", "--voice-channels", MEL20, "--save-repr"]),
     ],
+    # 2-2 확장 — 층이 '어디를' 보는가. layers 축(표현)과 다른 질문이다.
+    #
+    #   표현은 패치 축을 평균해 저장하므로, 7번 패치가 22번을 보든 8번을 보든
+    #   평균 뒤에는 구별되지 않는다. 인접 CKA 0.97이 "아무것도 안 섞었다"인지
+    #   "섞었는데 결과가 비슷하다"인지도 표현만으로는 갈리지 않는다.
+    #   공유 구성은 뺐다 — 단독 두 개로 필기·음성 대비가 이미 나온다.
+    "attn": [
+        ("hw", "hw", ["--save-attn", "--keep-ckpt"]),
+        ("voice", "voice", ["--voice-patch", "24", "--voice-stride", "9",
+                            "--voice-channels", MEL20, "--save-attn", "--keep-ckpt"]),
+    ],
     # ①+⑦ 합본. 두 축이 따로는 이겼는데 같이 걸면 어떤지는 따로 재야 한다.
     #   stride 9  꼬리 손실 0 (토큰 11 → 15)
     #   mel20     4칸 간격 20밴드 (인접 |r|=0.64라 80개는 중복)
@@ -211,6 +222,7 @@ BASELINE = {
     "ab": "hw_d64L6_s{seed}.csv",        # A(3채널)의 비교 대상은 6채널이다
     "class_weight": "hw_d64L6_s{seed}.csv",
     "layers": None,      # 표현 분석 전용 — 맞댈 대상이 없다
+    "attn": None,        # 어텐션 분석 전용
     "depth": "hw_d64L6_s{seed}.csv",
     "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
@@ -241,7 +253,7 @@ REBASE = {
 }
 
 # 실측 회당 소요(분). ETA용이라 정확할 필요는 없고 감만 주면 된다.
-MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "layers": 7, "ab": 3, "voice_stride": 6, "voice_mel": 4,
+MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "layers": 7, "attn": 5, "ab": 3, "voice_stride": 6, "voice_mel": 4,
            "d_model_v2": 11, "head": 5, "window_cap": 3, "hw_patch": 7,
            "hw_stride": 7, "d_model": 30, "voice_patch": 6, "class_weight": 5,
            "voice_v2": 6, "shared_v2": 9}

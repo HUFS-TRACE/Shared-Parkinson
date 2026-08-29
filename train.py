@@ -94,6 +94,13 @@ def parse_args():
     p.add_argument("--save-repr", action="store_true",
                    help="층별 pooled 표현을 저장한다. 층이 정보를 더하는지(linear probe) "
                         "표현이 바뀌는지(CKA) 재학습 없이 분석하기 위한 것")
+    p.add_argument("--save-attn", action="store_true",
+                   help="층별 어텐션(평균맵·거리·엔트로피)을 저장한다. 층이 '어디를' "
+                        "보는지를 재며, --save-repr(표현이 '어떻게' 바뀌나)과 다른 질문이다.")
+    p.add_argument("--keep-ckpt", action="store_true",
+                   help="fold별 학습된 가중치를 남긴다. 이것이 없으면 나중에 다른 것을 "
+                        "재려 할 때마다 재학습해야 한다 (어텐션 분석에서 한 번 겪었다). "
+                        "d64/L6 기준 fold당 약 1.5MB.")
     p.add_argument("--repr-cap", type=int, default=40,
                    help="사람당 저장할 윈도우 수 상한. float16으로도 전체를 담으면 "
                         "수 GB가 되므로 시간축 균등 간격으로 뽑는다")
@@ -286,6 +293,95 @@ def extract_layers(model, modality, loader, device):
     return np.stack([torch.cat(o).numpy() for o in outs])
 
 
+def extract_attention(model, modality, loader, device, sample_cap=40):
+    """층별 어텐션. → (평균맵 (L,H,P,P), 거리 (N,L), 엔트로피 (N,L))
+
+    층이 **어디를** 보는지를 잰다. extract_layers()가 재는 "표현이 어떻게 바뀌나"와
+    다른 질문이다 — 표현은 패치 축을 평균해 저장하므로, 7번이 22번을 보든 8번을
+    보든 평균 뒤에는 구별되지 않는다.
+
+    pre-LN(norm_first=True)이라 어텐션 입력은 z가 아니라 norm1(z)이다. 여기를
+    틀리면 가중치가 실제 것과 달라진다.
+
+    전부 저장하면 39x39 x 6층 x 4헤드 x 14,640 x 2바이트 = 1.1GB/시드다. 그래서
+    배치마다 곧바로 (a) 평균맵으로 누적하고 (b) 표본별 스칼라 2개로 줄인다.
+    평균맵만 두면 시드 짝 t검정을 할 수 없어 둘 다 남긴다.
+
+        거리    sum_j w_ij * |i-j|      작으면 국소, 크면 전역
+        엔트로피 -sum_j w_ij log w_ij   exp()가 "실질적으로 몇 개를 보나"
+    """
+    model.eval()
+    acc = sq = off = None
+    dist, ent, lstd, samples, n = [], [], [], [], 0
+    with torch.no_grad():
+        for X, _ in loader:
+            X = X.to(device)
+            b, c, _ = X.shape
+            z = model.embeddings[modality](X)
+            if off is None:                       # |i-j| 행렬 — 한 번만 만든다
+                ar = torch.arange(z.shape[1], device=device)
+                off = (ar[:, None] - ar[None, :]).abs().float()
+            bd, be, bl, bs = [], [], [], []
+            for li, layer in enumerate(model.encoder.layers):
+                h = layer.norm1(z)                # ★ pre-LN: 어텐션 입력은 norm1(z)
+                a, w = layer.self_attn(h, h, h, need_weights=True,
+                                       average_attn_weights=False)
+                bl.append(_logit_std(layer.self_attn, h))
+                z = z + layer.dropout1(a)
+                z = z + layer._ff_block(layer.norm2(z))
+
+                if acc is None:
+                    acc = [torch.zeros_like(w[0]) for _ in model.encoder.layers]
+                    sq = [torch.zeros_like(w[0]) for _ in model.encoder.layers]
+                acc[li] += w.sum(dim=0)
+                sq[li] += (w * w).sum(dim=0)      # 분산용 — 입력마다 얼마나 흔들리나
+
+                # (B*C, H, P, P) → 헤드·행 평균 → (B*C,) → 채널 평균 → (B,)
+                bd.append((w * off).sum(-1).mean((1, 2)).reshape(b, c).mean(1))
+                be.append(-(w.clamp_min(1e-12).log() * w).sum(-1)
+                          .mean((1, 2)).reshape(b, c).mean(1))
+                if len(samples) < sample_cap:
+                    bs.append(w[:sample_cap].cpu().half())
+            dist.append(torch.stack(bd, 1).cpu())
+            ent.append(torch.stack(be, 1).cpu())
+            lstd.append(torch.tensor(bl))
+            if bs and len(samples) < sample_cap:
+                samples.append(torch.stack(bs, 1))   # (n, L, H, P, P)
+            n += b * c
+
+    mean = torch.stack(acc).cpu().numpy() / n
+    var = torch.stack(sq).cpu().numpy() / n - mean ** 2
+    return dict(attn_map=mean.astype(np.float32),
+                attn_std=np.sqrt(np.maximum(var, 0)).astype(np.float32),
+                dist=torch.cat(dist).numpy(), ent=torch.cat(ent).numpy(),
+                logit_std=torch.stack(lstd).mean(0).numpy(),
+                samples=torch.cat(samples)[:sample_cap].numpy() if samples else
+                        np.zeros((0,), dtype=np.float16))
+
+
+def _logit_std(attn, h):
+    """어텐션 로짓(softmax 직전 QK^T/sqrt(d))의 표준편차.
+
+    엔트로피가 층마다 오르는 것이 '고르게 편다'는 뜻인지, 로짓이 작아져
+    softmax가 물러진 부산물인지 가른다. 로짓 표준편차가 층마다 같은데
+    엔트로피만 오르면 전자다.
+
+    잔차 노름은 이 교란의 원인이 될 수 없다 — pre-LN의 norm1이 정규화하므로
+    어텐션 입력 크기는 잔차가 아니라 LayerNorm의 학습된 gamma가 정한다.
+    """
+    d = h.shape[-1]
+    nh = attn.num_heads
+    dh = d // nh
+    qk = torch.nn.functional.linear(h, attn.in_proj_weight[:2 * d],
+                                    attn.in_proj_bias[:2 * d] if
+                                    attn.in_proj_bias is not None else None)
+    q, k = qk.chunk(2, dim=-1)
+    b, p, _ = q.shape
+    q = q.view(b, p, nh, dh).transpose(1, 2)
+    k = k.view(b, p, nh, dh).transpose(1, 2)
+    return float((q @ k.transpose(-2, -1) / dh ** 0.5).std())
+
+
 def _cap_positions(idx, sid_all, cap):
     """사람당 균등 간격으로 최대 cap개 위치만 남긴다. 앞에서 자르지 않는 이유는
     과제 후반부 신호를 버리지 않기 위해서다."""
@@ -335,6 +431,39 @@ def save_reprs(saved, data, tag, result_dir, cap):
         print(f"  층별 표현 저장: {out.name}  "
               f"test {R.shape[0]}층×{len(keep)}윈도우 · val {VR.shape[0]}층×{len(vkeep)}윈도우 "
               f"× {R.shape[2]}차원 ({out.stat().st_size / 1e6:.0f} MB)")
+
+
+def save_attn(saved, data, tag, result_dir):
+    """어텐션을 모달별 npz로. 평균맵 1장 + 표본별 스칼라 2개.
+
+    두 단계로 나누는 이유
+        전부 저장하면 39x39 x 6층 x 4헤드 x 14,640윈도우 x 2바이트 = 1.1GB/시드다.
+        평균맵(150KB)만 두면 그림은 그리지만 시드 짝 t검정을 못 한다 — 평균이
+        하나뿐이라 표본이 없다. 그래서 표본별 스칼라 2개(700KB)를 같이 남긴다.
+
+    fold 평균을 내는 이유
+        평균맵은 fold마다 별도로 학습된 모델에서 나오지만, 어텐션은 표현과 달리
+        좌표계 문제가 없다 — 축이 둘 다 '패치 위치'라 fold를 넘어 같은 뜻이다.
+    """
+    for m, s in saved.items():
+        if not s["attn_map"]:
+            continue
+        out = result_dir / f"attn_{m}_{tag}.npz"
+        idx = np.concatenate(s["idx"])
+        np.savez_compressed(
+            out,
+            attn_map=np.mean(s["attn_map"], axis=0).astype(np.float32),
+            attn_std=np.mean(s["attn_std"], axis=0).astype(np.float32),
+            logit_std=np.mean(s["attn_logit"], axis=0).astype(np.float32),
+            samples=np.concatenate(s["attn_samp"]),
+            dist=np.concatenate(s["attn_dist"]).astype(np.float32),
+            ent=np.concatenate(s["attn_ent"]).astype(np.float32),
+            idx=idx, fold=np.concatenate(s["fold"]),
+            y=data[m]["y"][idx], subject_id=data[m]["subject_id"][idx])
+        a = np.mean(s["attn_map"], axis=0)
+        print(f"  어텐션 저장: {out.name}  "
+              f"맵 {a.shape[0]}층×{a.shape[1]}헤드×{a.shape[2]}×{a.shape[3]} · "
+              f"표본 {len(idx)} ({out.stat().st_size / 1e6:.1f} MB)")
 
 
 def train_fold(model, train_loaders, val_loaders, criteria, cfg, device, ckpt):
@@ -449,7 +578,9 @@ def main():
     # 시간 축 Early Exit용 윈도우 확률. test는 fold를 가로질러 전체를 정확히 한 번씩
     # 덮지만, val은 fold마다 새로 떼므로 겹칠 수 있다. 그래서 fold 태그를 함께 남긴다.
     saved = {m: {k: [] for k in ("prob", "idx", "fold", "repr", "val_repr",
-                                 "val_prob", "val_idx", "val_fold")} for m in data}
+                                 "val_prob", "val_idx", "val_fold",
+                                 "attn_map", "attn_std", "attn_dist", "attn_ent",
+                                 "attn_logit", "attn_samp")} for m in data}
     ckpt = result_dir / f"_tmp_{os.getpid()}.pt"
 
     for fold in range(cfg["split"]["n_folds"]):
@@ -471,6 +602,10 @@ def main():
             {m: l[1] for m, l in loaders.items()}, criteria, cfg, device, ckpt)
         epochs_used.append(n_ep)
 
+        if args.keep_ckpt:
+            keep = result_dir / f"model_{out.stem}_f{fold}.pt"
+            torch.save(model.state_dict(), keep)
+
         print(f"[fold {fold + 1}/{cfg['split']['n_folds']}]  {n_ep} epoch (best {best_ep})")
         for m in data:
             _, preds, labels, probs = eval_modality(
@@ -491,6 +626,18 @@ def main():
                 saved[m]["repr"].append(extract_layers(model, m, loaders[m][2], device))
                 saved[m]["val_repr"].append(extract_layers(model, m, loaders[m][1], device))
                 if not args.save_probs:
+                    saved[m]["idx"].append(te)
+                    saved[m]["fold"].append(np.full(len(te), fold))
+
+            if args.save_attn:
+                a = extract_attention(model, m, loaders[m][2], device)
+                saved[m]["attn_map"].append(a["attn_map"])
+                saved[m]["attn_std"].append(a["attn_std"])
+                saved[m]["attn_dist"].append(a["dist"])
+                saved[m]["attn_ent"].append(a["ent"])
+                saved[m]["attn_logit"].append(a["logit_std"])
+                saved[m]["attn_samp"].append(a["samples"])
+                if not (args.save_probs or args.save_repr):
                     saved[m]["idx"].append(te)
                     saved[m]["fold"].append(np.full(len(te), fold))
                     va = folds[m][fold][1]
@@ -517,6 +664,8 @@ def main():
         save_probs(saved, data, out.stem, result_dir)
     if args.save_repr:
         save_reprs(saved, data, out.stem, result_dir, args.repr_cap)
+    if args.save_attn:
+        save_attn(saved, data, out.stem, result_dir)
 
     print(f"\n{'모달':<8}{'윈도우acc':>16}{'피험자 hard':>18}{'피험자 soft':>18}{'AUC':>16}")
     rows = []
