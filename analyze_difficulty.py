@@ -28,6 +28,12 @@
     저장된 가중치로 추론만 다시 한다. fold마다 모델이 다르므로 그 fold의 test에만
     쓴다 — 다른 fold에 쓰면 학습에 본 데이터가 섞인다.
 
+    ⚠️ 그래서 **학습 때와 같은 분할을 재구성해야 한다.** vdb 축은 --split-shuffle 로
+       학습했으므로 여기서도 shuffle=True가 기본이다. 그렇지 않은 체크포인트에
+       그대로 돌리면 조용히 학습 데이터로 평가하게 된다(실측: window_acc가
+       0.9481 -> 0.9579로 0.98%p 부풀려졌다). 그 경우 --no-split-shuffle 을 쓴다.
+       아래 검산이 이것을 자동으로 잡는다.
+
 실행
     python analyze_difficulty.py
     python analyze_difficulty.py --seeds 42 1 7 0 123 --bins 3 10 20
@@ -78,6 +84,9 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="*", default=[42, 1, 7, 0, 123])
     ap.add_argument("--bins", type=float, nargs="*", default=[3, 10, 20],
                     help="경계까지의 거리 구간 경계. 기본 <3 / 3~10 / 10~20 / >=20")
+    ap.add_argument("--no-split-shuffle", action="store_true",
+                    help="학습 때 --split-shuffle 을 쓰지 않았다면 이것을 켠다. "
+                         "분할이 학습과 달라지면 조용히 학습 데이터로 평가하게 된다")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -106,7 +115,7 @@ def main():
         folds = subject_kfold(sid, y, n_splits=cfg["split"]["n_folds"],
                               val_size=cfg["split"]["val_size"], seed=seed,
                               stratified=cfg["split"].get("stratified", False),
-                              shuffle=True)
+                              shuffle=not args.no_split_shuffle)
         for lab, tag in DEPTHS:
             p = np.full(len(y), np.nan, dtype=np.float32)
             L = 6 if lab == "L6" else int(lab[1])
@@ -122,6 +131,27 @@ def main():
 
     if not P:
         raise SystemExit("체크포인트가 없습니다. --keep-ckpt 로 학습해야 합니다.")
+
+    # 분할이 학습 때와 같은지 검산한다. 전체 window_acc가 학습 CSV와 어긋나면
+    # 다른 분할을 재구성한 것이고, 그러면 학습 데이터로 평가하는 셈이다.
+    import csv as _csv
+    for lab, tag in DEPTHS:
+        seen = [s for s in args.seeds if (s, lab) in P]
+        if not seen:
+            continue
+        ours = np.mean([np.mean((P[(s, lab)] >= 0.5).astype(int) == y) for s in seen])
+        theirs = []
+        for s in seen:
+            f = RES / f"{tag}_s{s}.csv"
+            if f.exists():
+                theirs += [float(r["window_acc"]) for r in
+                           _csv.DictReader(open(f, encoding="utf-8"))
+                           if r["modality"] == "ecg"]
+        if theirs and abs(ours - np.mean(theirs)) > 2e-3:
+            raise SystemExit(
+                f"[{lab}] 학습 때와 분할이 다릅니다. 재계산 {ours:.4f} vs "
+                f"CSV {np.mean(theirs):.4f}. --no-split-shuffle 을 확인하세요.")
+    print("  분할 검산 통과 — 학습 때와 같은 fold입니다.")
 
     print(f"\n{'구간':>12}{'윈도우':>9}{'양성률':>8}"
           + "".join(f"{lab:>9}" for lab, _ in DEPTHS)
