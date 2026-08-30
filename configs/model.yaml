@@ -20,6 +20,14 @@ modalities:
   hw:
     patch_len: 100     # T=2000 → 토큰 39개 (50% 겹침)
     stride: 50
+  # VitalDB 30초 = 3750샘플. patch 250/stride 125면 토큰 29개로 필기 39개와
+  # 비슷해진다. 커버 250+28*125 = 3750으로 꼬리 손실이 0이다(⑦번 지적 참고).
+  ecg:
+    patch_len: 250
+    stride: 125
+  ppg:
+    patch_len: 250
+    stride: 125
   voice:
     # ⚠️ 이 값은 T=200(2초)일 때 토큰 15개를 노린 것인데, 실제 데이터는
     #    voice_windows_1.5s.npz라 T=150이다. (150-24)//12+1 = 토큰 11개이고
