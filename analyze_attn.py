@@ -26,6 +26,7 @@ analyze_layers.py가 "표현이 어떻게 바뀌나"(probe·CKA)를 재는 데 �
 """
 import argparse
 import re
+from collections import defaultdict
 import sys
 from pathlib import Path
 
@@ -68,9 +69,10 @@ def map_corr(A):
     return n @ n.T
 
 
-def report(m, files):
+def report(m, files, config=""):
     print("=" * 78)
-    print(f"  {NAMES.get(m, m)}  ·  시드 {len(files)}개")
+    print(f"  {NAMES.get(m, m)}{'  ·  ' + config if config else ''}"
+          f"  ·  시드 {len(files)}개")
     print("=" * 78)
 
     Z, dists, ents, maps, seeds = [], [], [], [], []
@@ -168,7 +170,15 @@ def main():
         if not files:
             print(f"[{m}] 파일 없음 — attn_{m}_{args.tag}_*s*.npz")
             continue
-        report(m, files)
+
+        # 구성별로 나눈다. 한 태그에 단독과 공유가 함께 있으면(vdb 축의 ecg와
+        # shared) 합쳐서 평균내는 것은 서로 다른 학습을 섞는 것이다.
+        # analyze_layers.py가 tail로 묶는 것과 같은 처리다.
+        groups = defaultdict(list)
+        for f in files:
+            groups[re.sub(r"_s\d+$", "", f.stem)].append(f)
+        for key in sorted(groups):
+            report(m, groups[key], key[len(f"attn_{m}_") + len(args.tag) + 1:])
 
 
 if __name__ == "__main__":
