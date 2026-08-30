@@ -181,6 +181,34 @@ AXES = {
         ("voice", "voice", ["--voice-patch", "24", "--voice-stride", "9",
                             "--voice-channels", MEL20, "--save-attn", "--keep-ckpt"]),
     ],
+    # VitalDB 대조 — 파킨슨 결론의 양성 대조군.
+    #
+    #   파킨슨에서 "어텐션이 입력마다 다른데 표현을 안 바꾼다(CKA 0.97)"가 나왔고,
+    #   원인을 "정보가 패치 사이에 없다"로 봤다. 심박수는 봉우리 간격이라 정보가
+    #   패치 관계에 확실히 있다. 같은 지표로 여기서는 다른 값이 나와야 한다.
+    #   같게 나오면 측정 방법을 의심해야 한다.
+    #
+    #   라벨 의미(서맥·병 여부)는 이 비교와 무관하다. 표현 구조만 본다.
+    #   시간 축·센서 축은 뺀다 — 구간마다 라벨이 따로라 집계할 것이 없고,
+    #   심전도 1채널 + 맥파 1채널이라 채널 부분집합을 만들 수 없다.
+    "vdb": [
+        ("ecg", "ecg", ["--save-repr", "--save-attn", "--keep-ckpt"]),
+        ("ppg", "ppg", ["--save-repr", "--save-attn", "--keep-ckpt"]),
+        ("shared", "ecg,ppg", ["--save-repr", "--save-attn", "--keep-ckpt"]),
+    ],
+    # VitalDB 깊이 축 — "1층 표현으로 충분"과 "1층 모델로 충분"은 다른 진술이다.
+    #
+    #   probe가 읽는 L1은 6층 모델을 통째로 학습해 만든 L1이라, 깊은 층의 그래디언트가
+    #   이미 그 표현을 조각해 놓았다. 얕은 모델로 대체 가능한지 말하려면 L1짜리를
+    #   따로 학습해 비교해야 한다. 필기는 depth 축이 있는데 심박에는 없었다.
+    #   기준선은 vdb 축의 ecg(L6)를 그대로 쓴다.
+    #
+    #   표현·어텐션은 저장하지 않는다. 여기서 필요한 것은 최종 성능뿐이다.
+    "vdb_depth": [
+        ("L1", "ecg", ["--n-layers", "1", "--keep-ckpt"]),
+        ("L2", "ecg", ["--n-layers", "2", "--keep-ckpt"]),
+        ("L3", "ecg", ["--n-layers", "3", "--keep-ckpt"]),
+    ],
     # ①+⑦ 합본. 두 축이 따로는 이겼는데 같이 걸면 어떤지는 따로 재야 한다.
     #   stride 9  꼬리 손실 0 (토큰 11 → 15)
     #   mel20     4칸 간격 20밴드 (인접 |r|=0.64라 80개는 중복)
@@ -223,6 +251,8 @@ BASELINE = {
     "class_weight": "hw_d64L6_s{seed}.csv",
     "layers": None,      # 표현 분석 전용 — 맞댈 대상이 없다
     "attn": None,        # 어텐션 분석 전용
+    "vdb": None,         # VitalDB 대조 — 표현·어텐션 분석 전용
+    "vdb_depth": "vdb_vdb_ecg_s{seed}.csv",   # 기준은 같은 데이터의 L6
     "depth": "hw_d64L6_s{seed}.csv",
     "d_model_v2": "sw_shared_v2_s9mel20_s{seed}.csv",
     "voice_v2": "voice_d64L6_s{seed}.csv",
@@ -253,7 +283,7 @@ REBASE = {
 }
 
 # 실측 회당 소요(분). ETA용이라 정확할 필요는 없고 감만 주면 된다.
-MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "layers": 7, "attn": 5, "ab": 3, "voice_stride": 6, "voice_mel": 4,
+MINUTES = {"base": 6, "base_v1": 22, "depth": 3, "layers": 7, "attn": 5, "vdb": 12, "vdb_depth": 8, "ab": 3, "voice_stride": 6, "voice_mel": 4,
            "d_model_v2": 11, "head": 5, "window_cap": 3, "hw_patch": 7,
            "hw_stride": 7, "d_model": 30, "voice_patch": 6, "class_weight": 5,
            "voice_v2": 6, "shared_v2": 9}

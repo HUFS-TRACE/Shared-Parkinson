@@ -36,7 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 RES = Path(__file__).resolve().parent / "results"
 T_CRIT = 2.776          # 자유도 4, 양측 alpha=0.05
-NAMES = {"hw": "필기", "voice": "음성"}
+NAMES = {"hw": "필기", "voice": "음성", "ecg": "심전도", "ppg": "맥파"}
 
 
 def paired_t(d):
@@ -159,14 +159,14 @@ def report(m, files):
 def main():
     ap = argparse.ArgumentParser(description="층별 어텐션 집계")
     ap.add_argument("--tag", default="sw2")
-    ap.add_argument("--modality", nargs="*", default=["hw", "voice"])
+    ap.add_argument("--modality", nargs="*", default=["hw", "voice", "ecg", "ppg"])
     args = ap.parse_args()
 
     for m in args.modality:
-        files = sorted(RES.glob(f"attn_{m}_{args.tag}_attn_{m}_s*.npz"),
+        files = sorted(RES.glob(f"attn_{m}_{args.tag}_*s*.npz"),
                        key=lambda p: int(re.search(r"_s(\d+)\.npz", p.name).group(1)))
         if not files:
-            print(f"[{m}] 파일 없음 — attn_{m}_{args.tag}_attn_{m}_s*.npz")
+            print(f"[{m}] 파일 없음 — attn_{m}_{args.tag}_*s*.npz")
             continue
         report(m, files)
 
