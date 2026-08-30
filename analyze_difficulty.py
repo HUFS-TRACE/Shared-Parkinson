@@ -39,6 +39,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+from sklearn.metrics import roc_auc_score
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -49,6 +50,7 @@ from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parent
 RES = ROOT / "results"
+T_CRIT = 2.776       # 자유도 4, 양측 alpha=0.05
 DEPTHS = [("L1", "vdb_vdb_depth_L1"), ("L2", "vdb_vdb_depth_L2"),
           ("L3", "vdb_vdb_depth_L3"), ("L6", "vdb_vdb_ecg")]
 
@@ -128,41 +130,62 @@ def main():
     rows = []
     for i, nm in enumerate(names):
         m = (diff >= edges[i]) & (diff < edges[i + 1])
-        acc = {}
+        if len(np.unique(y[m])) < 2:
+            print(f"{nm:>12}  한 클래스뿐이라 건너뜀")
+            continue
+        auc = {}
         for lab, _ in DEPTHS:
-            per = [np.mean((P[(s, lab)][m] >= 0.5).astype(int) == y[m])
-                   for s in args.seeds if (s, lab) in P]
-            acc[lab] = np.array(per)
-        d = acc["L6"] - acc["L1"]
-        sg = "모두 +" if (d > 0).all() else "모두 -" if (d < 0).all() else "엇갈림"
+            auc[lab] = np.array([roc_auc_score(y[m], P[(s, lab)][m])
+                                 for s in args.seeds if (s, lab) in P])
+        d = auc["L6"] - auc["L1"]
+        sg = ("모두 +" if (d > 0).all() else "모두 -" if (d < 0).all()
+              else f"{(d > 0).sum()}/{len(d)}")
+        t = d.mean() / (d.std(ddof=1) / np.sqrt(len(d))) if d.std(ddof=1) else np.nan
+        rel = (auc["L6"].mean() - auc["L1"].mean()) / (1 - auc["L1"].mean())
         print(f"{nm:>12}{m.sum():>9,}{y[m].mean():>8.1%}"
-              + "".join(f"{acc[lab].mean():>9.4f}" for lab, _ in DEPTHS)
-              + f"{d.mean():>+9.4f}{sg:>8}")
-        rows.append((nm, m.sum(), d, y[m].mean()))
+              + "".join(f"{auc[lab].mean():>10.4f}" for lab, _ in DEPTHS)
+              + f"{d.mean():>+9.4f}{sg:>8}{t:>7.2f}{rel:>11.1%}")
+        rows.append((nm, m.sum(), d, y[m].mean(), int(y[m].sum())))
 
     print()
     print("  읽는 법")
 
-    # 한 클래스가 95%를 넘는 구간은 정확도가 의미를 잃는다. 다 찍어도 그만큼 나온다.
-    ok = [(nm, n, d) for nm, n, d, pr in rows if 0.05 < pr < 0.95]
-    for nm, _, _, pr in rows:
-        if not 0.05 < pr < 0.95:
-            print(f"     [{nm}] 양성률 {pr:.1%} — 한 클래스로 찍어도 "
-                  f"{max(pr, 1 - pr):.1%}라 정확도가 의미 없다. 해석에서 뺀다.")
-    if len(ok) < 2:
+    # 구간별 이득을 눈으로 비교하면 안 된다. 베이스라인이 구간마다 달라서
+    # %p가 공정하지 않고, 상대 오차는 부호가 엇갈리는 구간에서 의미가 없다.
+    # 시드를 짝지어 **구간 간 차이 자체를 검정**한다.
+    if len(rows) < 2:
         print("     비교할 구간이 부족하다.")
         return
+    # 양성이 30개 미만인 구간은 AUC가 불안정해 비교 대상에서 뺀다
+    solid = [r for r in rows if r[4] >= 30 and (len(r[2]) - r[4]) != 0]
+    thin = [r[0] for r in rows if r not in solid]
+    for nm in thin:
+        n_pos = [r[4] for r in rows if r[0] == nm][0]
+        print(f"     [{nm}] 양성 {n_pos}개 — AUC가 불안정하다. 비교에서 뺀다.")
+    ok = [(nm, d) for nm, _, d, _, _ in solid if (d > 0).all() or (d < 0).all()]
+    print(f"     부호가 일관된 구간: {[nm for nm, _ in ok] or '없음'}"
+          f"  (나머지는 검출 실패)")
 
-    g = np.array([d.mean() for _, _, d in ok])
-    print(f"     남은 구간 {[nm for nm, _, _ in ok]}  "
-          f"이득 {g.min():+.4f} ~ {g.max():+.4f}")
-    if g.max() - g.min() < 0.005:
-        print("     -> 난이도가 달라도 깊이 이득이 변하지 않는다. 적응할 여지가 없다.")
-        print("        표본마다 다른 깊이를 쓸 이유가 없어 Early Exit의 전제가 깨진다.")
-    elif g[0] > g[-1] + 0.01:
-        print("     -> 어려운 구간일수록 이득이 크다. 적응할 여지가 있다.")
+    print(f"\n구간 간 차이 (시드 짝)")
+    hard = solid[0]
+    sig = []
+    for nm, _, d, _, _ in solid[1:]:
+        x = hard[2] - d
+        t = x.mean() / (x.std(ddof=1) / np.sqrt(len(x))) if x.std(ddof=1) else np.nan
+        sg = ("모두 +" if (x > 0).all() else "모두 -" if (x < 0).all()
+              else f"{(x > 0).sum()}/{len(x)}")
+        hit = abs(t) > T_CRIT and ((x > 0).all() or (x < 0).all())
+        sig.append(hit)
+        print(f"   {hard[0]:>12} - {nm:<12}{x.mean():>+9.4f}{sg:>8}  t={t:+.2f}"
+              + (" ★" if abs(t) > T_CRIT else ""))
+
+    if any(sig) and hard[0] in [nm for nm, _ in ok]:
+        print("\n     -> 가장 어려운 구간의 깊이 이득이 다른 구간보다 유의하게 크다.")
+        print("        어려운 표본에만 깊이가 필요하다 — Early Exit의 전제가 성립한다.")
+    elif not ok:
+        print("\n     -> 어느 구간에서도 깊이 이득이 검출되지 않는다.")
     else:
-        print("     -> 구간별 이득이 순서를 이루지 않는다. 시드별 부호를 함께 볼 것.")
+        print("\n     -> 구간 간 차이가 유의하지 않다. 시드별 부호를 함께 볼 것.")
     print()
 
 
