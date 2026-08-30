@@ -57,7 +57,9 @@ def parse_args():
     p.add_argument("--config", type=Path, default=ROOT / "configs/config.yaml")
     p.add_argument("--model-config", type=Path, default=ROOT / "configs/model.yaml")
     p.add_argument("--modalities", default="hw,voice", help="쉼표 구분. hw / voice / hw,voice")
-    p.add_argument("--hw-path"); p.add_argument("--voice-path")
+    # 모달이 늘 때마다 인자를 더하지 않도록 config의 *_path 키에서 자동 생성한다
+    for _m in ("hw", "voice", "ecg", "ppg"):
+        p.add_argument(f"--{_m}-path", help=f"{_m} npz 경로. config.yaml을 덮어쓴다")
     p.add_argument("--epochs", type=int); p.add_argument("--batch-size", type=int)
     p.add_argument("--lr", type=float); p.add_argument("--patience", type=int)
     p.add_argument("--n-folds", type=int); p.add_argument("--seed", type=int)
@@ -125,10 +127,10 @@ def load_config(args):
         cfg["split"]["stratified"] = True
     if args.split_shuffle:
         cfg["split"]["shuffle"] = True
-    if args.hw_path:
-        cfg["data"]["hw_path"] = args.hw_path
-    if args.voice_path:
-        cfg["data"]["voice_path"] = args.voice_path
+    for m in ("hw", "voice", "ecg", "ppg"):
+        v = getattr(args, f"{m}_path", None)
+        if v:
+            cfg["data"][f"{m}_path"] = v
     if args.d_model:
         mcfg["shared_encoder"]["d_model"] = args.d_model
     if args.n_layers:
@@ -628,6 +630,9 @@ def main():
                 if not args.save_probs:
                     saved[m]["idx"].append(te)
                     saved[m]["fold"].append(np.full(len(te), fold))
+                    va = folds[m][fold][1]
+                    saved[m]["val_idx"].append(va)
+                    saved[m]["val_fold"].append(np.full(len(va), fold))
 
             if args.save_attn:
                 a = extract_attention(model, m, loaders[m][2], device)
