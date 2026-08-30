@@ -49,7 +49,10 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parent
 RES = ROOT / "results"
-MAX_N = 4000          # CKA 표본 상한. 이보다 많으면 무작위로 줄인다
+MAX_N = 4000        # 이 값을 넘으면 무작위로 골라 CKA를 잰다.
+                    # ⚠️ 그래서 CKA는 rng 시드에 따라 ±0.5%p 흔들린다. 실측: 심전도
+                    # L1-L2가 시드별로 0.8716~0.8756이고 전체를 쓴 참값은 0.8709다.
+                    # 문서에 표로 낼 값은 --exact 로 뽑아 서브샘플링을 끈다.          # CKA 표본 상한. 이보다 많으면 무작위로 줄인다
 
 
 def linear_cka(X, Y, rng=None):
