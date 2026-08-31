@@ -58,6 +58,7 @@ class SharedPatchTST(nn.Module):
         dropout=0.2,
         head_dropout=0.2,
         head="linear",
+        revin=True,
     ):
         super().__init__()
         if not specs:
@@ -71,7 +72,7 @@ class SharedPatchTST(nn.Module):
             name: PatchEmbedding(
                 num_channels=s["num_channels"], seq_len=s["seq_len"],
                 patch_len=s["patch_len"], stride=s["stride"],
-                d_model=d_model, dropout=dropout)
+                d_model=d_model, dropout=dropout, revin=revin)
             for name, s in specs.items()
         })
 

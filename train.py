@@ -40,8 +40,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 from models.shared_patchtst import SharedPatchTST
-from utils.dataset import (PairedBatches, class_weights, load_modality,
-                           make_loaders, subject_kfold, summarize, synthetic)
+from utils.dataset import (PairedBatches, class_weights, fixed_split,
+                           load_modality, make_loaders, subject_kfold, summarize,
+                           synthetic)
 from utils.metrics import evaluate_predictions, fold_class_balance
 
 ROOT = Path(__file__).resolve().parent
@@ -58,7 +59,7 @@ def parse_args():
     p.add_argument("--model-config", type=Path, default=ROOT / "configs/model.yaml")
     p.add_argument("--modalities", default="hw,voice", help="쉼표 구분. hw / voice / hw,voice")
     # 모달이 늘 때마다 인자를 더하지 않도록 config의 *_path 키에서 자동 생성한다
-    for _m in ("hw", "voice", "ecg", "ppg"):
+    for _m in ("hw", "voice", "ecg", "ppg", "sepsis", "sepsis12"):
         p.add_argument(f"--{_m}-path", help=f"{_m} npz 경로. config.yaml을 덮어쓴다")
     p.add_argument("--epochs", type=int); p.add_argument("--batch-size", type=int)
     p.add_argument("--lr", type=float); p.add_argument("--patience", type=int)
@@ -99,6 +100,13 @@ def parse_args():
     p.add_argument("--save-attn", action="store_true",
                    help="층별 어텐션(평균맵·거리·엔트로피)을 저장한다. 층이 '어디를' "
                         "보는지를 재며, --save-repr(표현이 '어떻게' 바뀌나)과 다른 질문이다.")
+    p.add_argument("--no-revin", action="store_true",
+                   help="RevIN을 끈다. 입력이 이미 정규화돼 있으면 윈도우마다 평균을 "
+                        "다시 빼는 것이 정보를 지운다 (PhysioNet 패혈증)")
+    p.add_argument("--fixed-split", action="store_true",
+                   help="npz의 split 배열(0=train 1=val 2=test)을 그대로 쓴다. "
+                        "정규화 통계를 그 train으로 뽑은 데이터는 다시 나누면 누수가 된다. "
+                        "⚠️ 분할이 하나뿐이라 시드 짝 t검정을 할 수 없다")
     p.add_argument("--keep-ckpt", action="store_true",
                    help="fold별 학습된 가중치를 남긴다. 이것이 없으면 나중에 다른 것을 "
                         "재려 할 때마다 재학습해야 한다 (어텐션 분석에서 한 번 겪었다). "
@@ -127,7 +135,7 @@ def load_config(args):
         cfg["split"]["stratified"] = True
     if args.split_shuffle:
         cfg["split"]["shuffle"] = True
-    for m in ("hw", "voice", "ecg", "ppg"):
+    for m in ("hw", "voice", "ecg", "ppg", "sepsis", "sepsis12"):
         v = getattr(args, f"{m}_path", None)
         if v:
             cfg["data"][f"{m}_path"] = v
@@ -137,6 +145,8 @@ def load_config(args):
         mcfg["shared_encoder"]["n_layers"] = args.n_layers
     if args.head:
         mcfg["shared_encoder"]["head"] = args.head
+    if args.no_revin:
+        mcfg["shared_encoder"]["revin"] = False
     for m in mcfg["modalities"]:
         for cli, key in (("patch", "patch_len"), ("stride", "stride")):
             v = getattr(args, f"{m}_{cli}", None)
@@ -159,6 +169,13 @@ def gather_data(args, cfg):
                     f"[{m}] {path} 가 없습니다. configs/config.yaml의 경로를 고치거나 "
                     f"--{m}-path로 지정하세요. 파이프라인만 확인하려면 --smoke-test.")
             X, y, sid = load_modality(path)
+            spl = None
+            if args.fixed_split:
+                with np.load(path, allow_pickle=True) as _z:
+                    if "split" not in _z:
+                        raise SystemExit(f"[{m}] --fixed-split 인데 npz에 split이 "
+                                         f"없습니다. (있는 키: {list(_z.keys())})")
+                    spl = np.asarray(_z["split"])
 
         # 센서(채널) 축 실험 — 채널 부분집합만 남긴다.
         # RevIN의 채널별 affine과 분류기의 num_channels·d_model 입력이 채널 수에
@@ -175,6 +192,8 @@ def gather_data(args, cfg):
             X = np.ascontiguousarray(X[:, idx, :])
 
         data[m] = dict(X=X, y=y, subject_id=sid)
+        if not args.smoke_test and args.fixed_split:
+            data[m]["split"] = spl
     return data
 
 
@@ -556,11 +575,14 @@ def main():
     del probe
     torch.manual_seed(seed)          # probe가 소비한 RNG를 되돌린다
 
-    folds = {m: subject_kfold(d["subject_id"], d["y"], n_splits=cfg["split"]["n_folds"],
+    folds = {m: (fixed_split(d["split"]) if args.fixed_split else
+                 subject_kfold(d["subject_id"], d["y"], n_splits=cfg["split"]["n_folds"],
                               val_size=cfg["split"]["val_size"], seed=seed,
                               stratified=cfg["split"]["stratified"],
-                              shuffle=cfg["split"].get("shuffle", False))
+                              shuffle=cfg["split"].get("shuffle", False)))
              for m, d in data.items()}
+    if args.fixed_split:
+        cfg["split"]["n_folds"] = 1
 
     if args.max_windows:
         folds = cap_train_windows(folds, data, args.max_windows)
@@ -575,7 +597,8 @@ def main():
           f"(pair-mode={cfg['train']['pair_mode']}, 최대 {cfg['train']['epochs']} epoch)\n")
 
     acc = {m: {k: [] for k in
-               ("window_acc", "subject_acc", "subject_acc_soft", "roc_auc")} for m in data}
+               ("window_acc", "subject_acc", "subject_acc_soft", "roc_auc",
+                "auprc", "pos_rate")} for m in data}
     epochs_used = []
     # 시간 축 Early Exit용 윈도우 확률. test는 fold를 가로질러 전체를 정확히 한 번씩
     # 덮지만, val은 fold마다 새로 떼므로 겹칠 수 있다. 그래서 fold 태그를 함께 남긴다.
@@ -676,7 +699,8 @@ def main():
     rows = []
     for m in data:
         cells = [f"{np.mean(acc[m][k]):.3f} ± {np.std(acc[m][k]):.3f}"
-                 for k in ("window_acc", "subject_acc", "subject_acc_soft", "roc_auc")]
+                 for k in ("window_acc", "subject_acc", "subject_acc_soft", "roc_auc",
+                           "auprc", "pos_rate")]
         print(f"{m:<8}{cells[0]:>16}{cells[1]:>18}{cells[2]:>18}{cells[3]:>16}")
         rows.append(dict(
             modality=m,

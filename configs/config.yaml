@@ -11,6 +11,10 @@ data:
   #   기본       hr 60~100 정상 / 밖 비정상   전처리 노트북 원본 정의
   #   _brady     hr < 60 서맥                경계가 하나라 난이도 스윕이 된다
   # vitaldb_to_npz.py --max-subjects 260 --cap 40 로 파킨슨 음성(231명) 규모에 맞췄다.
+  # PhysioNet 2019 패혈증 (민규 전처리). 시간 단위 라벨, 이미 z-score 완료.
+  #   ⚠️ --no-revin 과 --fixed-split 을 함께 써야 한다 (제작자 조건)
+  sepsis_path: dataset/processed/sepsis/sepsis_24h.npz
+  sepsis12_path: dataset/processed/sepsis/sepsis_12h.npz
   ecg_path: dataset/processed/vitaldb/ecg_windows_30s_brady.npz
   ppg_path: dataset/processed/vitaldb/ppg_windows_30s_brady.npz
 
