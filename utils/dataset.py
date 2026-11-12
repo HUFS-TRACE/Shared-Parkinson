@@ -57,6 +57,20 @@ def summarize(name, X, y, subject_id):
             f"  (1인당 최소 {per.min()} / 중앙 {int(np.median(per))} / 최대 {per.max()})")
 
 
+def fixed_split(split):
+    """npz의 split 배열(0=train 1=val 2=test)을 fold 하나로 만든다.
+
+    정규화 통계를 그 train 기준으로 뽑은 데이터는 다시 나누면 누수가 된다.
+    그런 데이터를 제작자 조건 그대로 돌릴 때 쓴다.
+
+    ⚠️ fold가 하나뿐이라 시드 짝 t검정도 부호 일관성도 볼 수 없다. 시드는
+       초기화만 바꾸므로 "초기화를 바꿔도 재현되는가"까지만 말할 수 있다.
+    """
+    return [(np.nonzero(split == 0)[0],
+             np.nonzero(split == 1)[0],
+             np.nonzero(split == 2)[0])]
+
+
 def subject_kfold(subject_id, y, n_splits=5, val_size=0.1, seed=42, stratified=False,
                   shuffle=False):
     """피험자 단위 K-Fold. 같은 사람이 train/val/test에 걸치지 않는다.

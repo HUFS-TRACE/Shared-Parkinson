@@ -2,4 +2,7 @@ results/
 __pycache__/
 *.pyc
 _tmp_*.pt
+model_*.pt        # 학습 가중치 — 데이터라 깃에 올리지 않는다
 
+
+dataset/vitaldb/    # VitalDB 전처리 산출물 - 데이터라 깃에 올리지 않는다

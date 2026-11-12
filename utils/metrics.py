@@ -11,7 +11,7 @@
     같은 크기였다. **필기에서는 ROC-AUC를 보는 편이 안전하다.**
 """
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 def subject_vote_hard(pred, subject_id, y_true):
@@ -47,6 +47,12 @@ def evaluate_predictions(preds, probs, labels, subject_id):
         subject_acc_soft=subject_vote_soft(probs, subject_id, labels),
         roc_auc=(float(roc_auc_score(labels, probs))
                  if len(np.unique(labels)) > 1 else float("nan")),
+        # 양성이 드물면 AUC가 낙관적으로 보인다. 음성이 압도적이라 FPR이 잘 안
+        # 오르기 때문이다. AUPRC는 무작위 기준선이 양성률과 같아 그 비교가 정직하다
+        # (패혈증 양성 3%면 무작위 AUPRC가 0.03이다).
+        auprc=(float(average_precision_score(labels, probs))
+               if len(np.unique(labels)) > 1 else float("nan")),
+        pos_rate=float(np.mean(labels)),
     )
 
 

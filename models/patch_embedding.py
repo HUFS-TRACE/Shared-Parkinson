@@ -22,7 +22,7 @@ class PatchEmbedding(nn.Module):
         stride:       패치 간격. patch_len의 절반이면 50% 겹침
     """
 
-    def __init__(self, num_channels, seq_len, patch_len, stride, d_model, dropout=0.2):
+    def __init__(self, num_channels, seq_len, patch_len, stride, d_model, dropout=0.2, revin=True):
         super().__init__()
         self.num_channels = num_channels
         self.patch_len = patch_len
@@ -35,14 +35,17 @@ class PatchEmbedding(nn.Module):
                 f"patch_len({patch_len})·stride({stride})를 확인하세요."
             )
 
-        self.revin = RevIN(num_channels)
+        # 입력이 이미 정규화된 데이터면 꺼야 한다. 윈도우마다 평균을 다시 빼면
+        # "심박 130과 70"의 차이가 사라지기 때문이다(PhysioNet 패혈증이 그 경우).
+        self.revin = RevIN(num_channels) if revin else None
         self.proj = nn.Linear(patch_len, d_model)
         self.pos_enc = PositionalEncoding(d_model, max_len=self.num_patches)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         b, c, _ = x.shape
-        x = self.revin(x)                                    # (B, C, T)
+        if self.revin is not None:
+            x = self.revin(x)                                # (B, C, T)
         x = x.unfold(dimension=-1,
                      size=self.patch_len,
                      step=self.stride)                       # (B, C, P, patch_len)
